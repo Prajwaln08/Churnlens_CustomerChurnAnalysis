@@ -1,0 +1,25 @@
+# Secrets / local config — keys never go to git
+.env
+*.pem
+*.key
+secrets/
+
+# Docs & planning notes stay local — code only in git
+*.md
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data & model artifacts (README documents how to fetch/rebuild)
+Dataset/
+models/
+*.joblib
+
+# OS
+.DS_Store

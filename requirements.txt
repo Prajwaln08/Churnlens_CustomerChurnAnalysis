@@ -1,0 +1,17 @@
+# Core data stack
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.8
+seaborn>=0.13
+scikit-learn>=1.4
+jupyter
+python-dotenv>=1.0
+joblib>=1.3
+
+# Extended lenses
+lifelines>=0.28        # Lens B: survival analysis (Kaplan-Meier, Cox PH)
+scikit-uplift>=0.5     # Lens C: uplift modeling (MegaFon dataset + models)
+lifetimes>=0.11        # Lens E: CLV (BG/NBD + Gamma-Gamma)
+
+# App / deployment (Phase 2)
+streamlit>=1.32
