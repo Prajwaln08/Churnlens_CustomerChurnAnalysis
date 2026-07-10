@@ -257,6 +257,27 @@ def score(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return out, report
 
 
+def survival_curve(df: pd.DataFrame, max_months: int = 72) -> pd.DataFrame | None:
+    """P(still a customer) per month for each row, from the Cox artifact.
+
+    Returns a frame indexed by month (0..max_months), one column per input row.
+    None when the data does not satisfy lens B or the artifact is missing.
+    Horizon note: the training data observes at most 72 months of tenure -
+    the curve is not extrapolated beyond that.
+    """
+    rep = validate(df)
+    if not rep["lenses"]["B"]["ok"] or not artifact_exists("cox_bundle"):
+        return None
+    bundle = models.load_model("cox_bundle")
+    out = _coerce_telco(df)
+    dummies = pd.get_dummies(
+        out.drop(columns=["customerID", "TotalCharges"], errors="ignore")
+    ).astype(float, errors="ignore")
+    covars = dummies.reindex(columns=bundle["columns"], fill_value=0.0)
+    times = list(range(0, max_months + 1))
+    return bundle["model"].predict_survival_function(covars, times=times)
+
+
 # --------------------------------------------------------------------------
 # Scoring - transaction schema (lens E, full BG/NBD + Gamma-Gamma)
 # --------------------------------------------------------------------------
