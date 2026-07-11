@@ -21,10 +21,18 @@ import streamlit as st
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "Code"))
 
-from src import pipeline  # noqa: E402
+from src import bootstrap, pipeline  # noqa: E402
 from src.eda import CONTEXT_COLOR, PALETTE  # noqa: E402
 
 st.set_page_config(page_title="ChurnLens", layout="wide")
+
+# Fresh deployments have no artifacts (models/ never enters git) - build the
+# demo models once from the public Telco dataset. No-op when artifacts exist.
+if not bootstrap.artifacts_ready():
+    with st.status("First boot: training demo models from the public Telco "
+                   "dataset (about a minute)...", expanded=True) as _status:
+        bootstrap.ensure_artifacts(progress=st.write)
+        _status.update(label="Demo models ready.", state="complete")
 
 LENS_INFO = {
     "A": ("Who churns", "churn probability per customer"),
