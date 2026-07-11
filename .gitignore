@@ -6,6 +6,7 @@ secrets/
 
 # Docs & planning notes stay local — code only in git
 *.md
+*.html
 
 # Python
 .venv/
