@@ -43,9 +43,12 @@ def test_level1_full_run_completes_offline(bank_frame, registry):
     assert m.status == rm.RUN_COMPLETED
     stages = m.data["stages"]
     for stage in ("ingest", "profile", "map", "validate", "clean",
-                  "eda_report", "persist"):
+                  "eda_report", "mode", "persist"):
         assert stages[stage]["status"] == rm.DONE, stage
-    assert stages["score"]["status"] == rm.SKIPPED          # no artifacts here
+    # fuzzy mapping leaves churned_flag unmapped -> explore -> no train, no score
+    assert m.data["reports"]["mode_decision"]["mode"] == "explore"
+    assert stages["train"]["status"] == rm.SKIPPED
+    assert stages["score"]["status"] == rm.SKIPPED
 
     # ledger + artifacts on disk
     assert m.ledger_lines()
@@ -97,6 +100,34 @@ def test_quarantined_column_never_mapped(bank_frame, registry):
     renamed = m.data["reports"]["mapping"]["renamed"]
     assert "close_reason" not in renamed                      # leak stays out
     assert "close_reason" in m.data["reports"]["mapping"]["quarantined"]
+
+
+def test_train_mode_full_path(labeled_frame, registry):
+    """Labeled data with a new schema: mode=TRAIN, fresh artifacts pass the
+    gate, and the data is scored with its OWN model."""
+    m = run_pipeline(labeled_frame, "credit-union", autonomy_level=1,
+                     registry=registry, raise_on_error=True)
+
+    assert m.status == rm.RUN_COMPLETED
+    assert m.data["reports"]["mode_decision"]["mode"] == "train"
+    stages = m.data["stages"]
+    assert stages["train"]["status"] == rm.DONE
+    assert stages["score"]["status"] == rm.DONE
+
+    training = m.data["reports"]["training"]
+    assert training["lenses"]["A"]["status"] == "promoted"
+    assert "close_reason" in training["leakage"]["dropped"]
+
+    assert (config.MODEL_DIR / "credit-union" / "churn_pipeline.joblib").exists()
+    assert (m.run_dir / "scored.parquet").exists()
+    assert any("freshly trained model" in line for line in m.ledger_lines())
+
+    # run 2 for the same source: per-dataset artifacts exist -> SCORE mode
+    m2 = run_pipeline(labeled_frame.sample(150, random_state=2), "credit-union",
+                      autonomy_level=1, registry=registry, raise_on_error=True)
+    assert m2.data["reports"]["mode_decision"]["mode"] == "score"
+    assert m2.data["stages"]["train"]["status"] == rm.SKIPPED
+    assert any("dataset 'credit-union' model" in line for line in m2.ledger_lines())
 
 
 def test_failure_is_recorded_not_raised(bank_frame, registry, monkeypatch):

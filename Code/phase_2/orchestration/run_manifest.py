@@ -27,7 +27,7 @@ import pandas as pd
 
 from phase_1 import config
 
-# The stage chain, in execution order (architecture.md section 3).
+# The stage chain, in execution order (architecture.md sections 0 + 3).
 STAGES = (
     "ingest",
     "profile",
@@ -35,6 +35,8 @@ STAGES = (
     "validate",
     "clean",
     "eda_report",
+    "mode",
+    "train",
     "score",
     "persist",
 )

@@ -78,8 +78,9 @@ CONTRACTS: dict[str, dict] = {
 RISK_BANDS = [(0.30, "Low"), (0.60, "Medium"), (0.80, "High"), (1.01, "Critical")]
 
 
-def artifact_exists(name: str) -> bool:
-    return (config.MODEL_DIR / f"{name}.joblib").exists()
+def artifact_exists(name: str, dataset_id: str | None = None) -> bool:
+    directory = config.MODEL_DIR / dataset_id if dataset_id else config.MODEL_DIR
+    return (directory / f"{name}.joblib").exists()
 
 
 # --------------------------------------------------------------------------

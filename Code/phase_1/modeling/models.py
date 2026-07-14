@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+from pathlib import Path
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -39,14 +41,21 @@ def _strip_lifetimes_lambdas(obj) -> None:
         obj.__dict__.pop("generate_new_data", None)
 
 
-def save_model(obj, name: str) -> None:
-    config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
+def _model_dir(dataset_id: str | None) -> "Path":
+    """Global artifacts live in models/; per-dataset artifacts in
+    models/<dataset_id>/ (the phase-3 namespacing)."""
+    return config.MODEL_DIR / dataset_id if dataset_id else config.MODEL_DIR
+
+
+def save_model(obj, name: str, dataset_id: str | None = None) -> None:
+    directory = _model_dir(dataset_id)
+    directory.mkdir(parents=True, exist_ok=True)
     _strip_lifetimes_lambdas(obj)
-    joblib.dump(obj, config.MODEL_DIR / f"{name}.joblib")
+    joblib.dump(obj, directory / f"{name}.joblib")
 
 
-def load_model(name: str):
-    return joblib.load(config.MODEL_DIR / f"{name}.joblib")
+def load_model(name: str, dataset_id: str | None = None):
+    return joblib.load(_model_dir(dataset_id) / f"{name}.joblib")
 
 
 def update_metrics(section: str, payload: dict) -> None:

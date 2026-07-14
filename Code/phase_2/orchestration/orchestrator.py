@@ -35,10 +35,10 @@ from phase_1.visualization import eda
 
 from ..mapping import mapping as mapping_mod
 from ..profiling import profiler
+from ..training import auto_train
+from ..training import mode as mode_mod
 from .registry import Registry
 from .run_manifest import RunManifest
-
-SCORE_ARTIFACT = "churn_pipeline"          # minimum artifact for score mode
 
 
 def _content_hash(df: pd.DataFrame) -> str:
@@ -174,21 +174,61 @@ def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_over
             m.add_artifact("eda_report", path)
         m.add_note("eda_report", f"{len(charts)} chart(s) attached to the run")
 
+    # ---------------------------------------------------------------- mode
+    with m.stage("mode"):
+        decision = mode_mod.decide(cleaned, m.data["source"])
+        m.attach_report("mode_decision", decision)
+        m.add_note("mode", f"decision: {decision['mode'].upper()} - "
+                           + "; ".join(decision["reasons"]))
+    dataset_id = decision["dataset_id"]
+
+    # ---------------------------------------------------------------- train
+    train_report = None
+    if decision["mode"] == mode_mod.TRAIN:
+        with m.stage("train"):
+            train_report = auto_train.train_for_dataset(cleaned, dataset_id)
+            m.attach_report("training", train_report)
+            for col, reason in train_report["leakage"]["dropped"].items():
+                m.add_note("train", f"excluded {col}: {reason}")
+            m.add_note("train", f"features used: "
+                                f"{len(train_report['leakage']['kept'])}")
+            for lens, info in train_report["lenses"].items():
+                m.add_note("train", f"lens {lens}: {info['status']} - "
+                                    f"{info['reason']}")
+            m.record("train", rows_in=len(cleaned), rows_out=len(cleaned))
+    else:
+        m.skip("train", f"mode is {decision['mode']} - no training needed")
+
     # ---------------------------------------------------------------- score
     scored = None
-    if pipeline.artifact_exists(SCORE_ARTIFACT):
+    if decision["mode"] == mode_mod.SCORE:
         with m.stage("score"):
-            scored, score_report = pipeline.score(cleaned)
-            m.attach_report("scoring", {"applied": score_report["applied"],
-                                        "errors": score_report.get("errors", {})})
-            m.add_note("score", f"lenses applied: "
-                                f"{', '.join(score_report['applied']) or 'none'}")
-            for lens, err in score_report.get("errors", {}).items():
-                m.add_note("score", f"lens {lens} error: {err}")
+            if pipeline.artifact_exists("churn_pipeline", dataset_id=dataset_id):
+                scored = auto_train.score_with_dataset_model(cleaned, dataset_id)
+                m.add_note("score", f"scored with dataset '{dataset_id}' model")
+            else:
+                scored, score_report = pipeline.score(cleaned)
+                m.attach_report("scoring", {
+                    "applied": score_report["applied"],
+                    "errors": score_report.get("errors", {})})
+                m.add_note("score", "lenses applied: "
+                           + (", ".join(score_report["applied"]) or "none"))
+                for lens, err in score_report.get("errors", {}).items():
+                    m.add_note("score", f"lens {lens} error: {err}")
             m.record("score", rows_in=len(cleaned), rows_out=len(scored))
+    elif (train_report is not None
+          and train_report["lenses"]["A"]["status"] == "promoted"):
+        with m.stage("score"):
+            scored = auto_train.score_with_dataset_model(cleaned, dataset_id)
+            auc = train_report["lenses"]["A"]["test_roc_auc"]
+            m.add_note("score", f"scored with freshly trained model "
+                                f"(test ROC-AUC {auc})")
+            m.record("score", rows_in=len(cleaned), rows_out=len(scored))
+    elif train_report is not None:
+        m.skip("score", "trained model did not clear its quality gate - "
+                        "scores would not be trustworthy")
     else:
-        m.skip("score", f"artifact '{SCORE_ARTIFACT}' not trained - "
-                        "train mode arrives in build-order phase 3")
+        m.skip("score", "explore mode - no label, nothing to score with")
 
     # ---------------------------------------------------------------- persist
     with m.stage("persist"):

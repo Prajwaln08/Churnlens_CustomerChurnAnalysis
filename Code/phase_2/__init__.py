@@ -12,5 +12,7 @@ Flat aliases below keep call sites short
 from .profiling import profiler
 from .mapping import mapping
 from .orchestration import orchestrator, registry, run_manifest
+from .training import auto_train, leakage, mode
 
-__all__ = ["profiler", "mapping", "orchestrator", "registry", "run_manifest"]
+__all__ = ["profiler", "mapping", "orchestrator", "registry", "run_manifest",
+           "auto_train", "leakage", "mode"]
