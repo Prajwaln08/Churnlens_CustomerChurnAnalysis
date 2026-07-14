@@ -224,6 +224,7 @@ def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_over
             if pipeline.artifact_exists("churn_pipeline", dataset_id=dataset_id):
                 scored = auto_train.score_with_dataset_model(cleaned, dataset_id)
                 m.add_note("score", f"scored with dataset '{dataset_id}' model")
+                scored = _attach_analytics(m, scored, dataset_id)
             else:
                 scored, score_report = pipeline.score(cleaned)
                 m.attach_report("scoring", {
@@ -241,6 +242,7 @@ def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_over
             auc = train_report["lenses"]["A"]["test_roc_auc"]
             m.add_note("score", f"scored with freshly trained model "
                                 f"(test ROC-AUC {auc})")
+            scored = _attach_analytics(m, scored, dataset_id)
             m.record("score", rows_in=len(cleaned), rows_out=len(scored))
     elif train_report is not None:
         m.skip("score", "trained model did not clear its quality gate - "
@@ -291,6 +293,26 @@ def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_over
 
     m.finish()
     registry.record_run(m.data)
+
+
+def _attach_analytics(m, scored: pd.DataFrame, dataset_id: str) -> pd.DataFrame:
+    """Section-14 analytics: enrich the scored frame with individual-level
+    columns and attach the population report + ledger highlights."""
+    from ..analytics import enrich_and_summarize
+
+    enriched, population = enrich_and_summarize(scored, dataset_id)
+    m.attach_report("analytics", population)
+    drivers = population.get("global_drivers", [])
+    if drivers:
+        m.add_note("score", "global churn drivers: " + ", ".join(
+            f"{d['feature']} ({d['mean_abs_effect_pp']}pp)" for d in drivers[:3]))
+    if "top_decile_lift" in population:
+        m.add_note("score", f"top-decile lift: {population['top_decile_lift']:.2f}x")
+    if "revenue_at_risk" in population:
+        rar = population["revenue_at_risk"]
+        m.add_note("score", f"total revenue at risk: {rar['total']:,.0f} "
+                            f"({rar['top_decile_share']:.0%} held by the top decile)")
+    return enriched
 
 
 def _eda_charts(df: pd.DataFrame, run_dir) -> list:

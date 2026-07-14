@@ -72,6 +72,7 @@ def test_messy_real_world_data_trains_and_scores(labeled_frame):
     assert report["lenses"]["A"]["status"] == "promoted"
     assert report["encoding"]["frequency"] == ["city"]     # not one-hot exploded
     assert "plan" in report["encoding"]["one_hot"]
+    assert report["lenses"]["B"]["status"] != "failed"     # Cox survives NaNs now
 
     scored = auto_train.score_with_dataset_model(messy, "messy-source")
     assert scored["churn_probability"].between(0, 1).all()

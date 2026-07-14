@@ -144,7 +144,13 @@ def _train_survival(data: pd.DataFrame, features: list[str], y: pd.Series,
     from lifelines import CoxPHFitter
 
     covariates = [c for c in features if c != "tenure"]
-    frame = pd.get_dummies(data[covariates], drop_first=True).astype(float)
+    covar_frame = data[covariates].copy()
+    for col in covar_frame.columns:      # Cox cannot see NaNs - impute simply
+        if pd.api.types.is_numeric_dtype(covar_frame[col]):
+            covar_frame[col] = covar_frame[col].fillna(covar_frame[col].median())
+        else:
+            covar_frame[col] = covar_frame[col].fillna("missing")
+    frame = pd.get_dummies(covar_frame, drop_first=True).astype(float)
     frame["tenure"] = pd.to_numeric(data["tenure"], errors="coerce").clip(lower=0.5)
     frame["Churn"] = y.values
     frame = frame.dropna(subset=["tenure"])
@@ -182,13 +188,6 @@ def score_for_source(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
     if saved is not None:
         frame, _ = mapping_mod.apply_mapping(df, saved)
     frame = _coerce_telco(frame)
-    from phase_1.modeling import load_model
-    bundle = load_model("churn_pipeline", dataset_id=dataset_id)
-    derived = {f: f[:-5] for f in bundle["features"]
-               if f.endswith("_days") and f not in frame.columns
-               and f[:-5] in frame.columns}
-    if derived:
-        frame = leakage.derive_datetime_features(frame, derived)
     return score_with_dataset_model(frame, dataset_id)
 
 
@@ -199,6 +198,14 @@ def score_with_dataset_model(df: pd.DataFrame, dataset_id: str) -> pd.DataFrame:
 
     bundle = load_model("churn_pipeline", dataset_id=dataset_id)
     out = df.copy()
+    # replay any datetime-derived training features ('<col>_days') so every
+    # caller - orchestrator, REST, MCP - is derivation-safe
+    derived = {f: f[:-5] for f in bundle["features"]
+               if f.endswith("_days") and f not in out.columns
+               and f[:-5] in out.columns}
+    if derived:
+        from . import leakage
+        out = leakage.derive_datetime_features(out, derived)
     missing = [c for c in bundle["features"] if c not in out.columns]
     if missing:
         raise ValueError(f"dataset model needs columns: {missing}")

@@ -311,8 +311,9 @@ with st.sidebar:
             "A grey card means the provided data is missing the columns that "
             "lens needs - an explicit status, not an error.")
 
-tab_score, tab_integrate, tab_process, tab_target = st.tabs(
-    ["Score", "Integrate (new data)", "Process (runs)", "Targeting (uplift)"])
+tab_score, tab_integrate, tab_process, tab_journeys, tab_target = st.tabs(
+    ["Score", "Integrate (new data)", "Process (runs)",
+     "Journeys (engagement churn)", "Targeting (uplift)"])
 
 with tab_score:
     if mode == "Single customer (what-if)":
@@ -513,6 +514,24 @@ with tab_process:
             drift_rep = m_sel.data.get("reports", {}).get("drift")
             if drift_rep and drift_rep.get("alerts"):
                 st.warning(f"Drift alert: {drift_rep['recommendation']}")
+            analytics_rep = m_sel.data.get("reports", {}).get("analytics")
+            if analytics_rep:
+                st.markdown("**Population insights**")
+                c1, c2 = st.columns(2)
+                if analytics_rep.get("global_drivers"):
+                    c1.caption("Global churn drivers (mean effect, percentage points)")
+                    c1.dataframe(pd.DataFrame(analytics_rep["global_drivers"]),
+                                 width="stretch", hide_index=True)
+                if analytics_rep.get("segments"):
+                    c2.caption("Segments (lens D)")
+                    seg_frame = pd.DataFrame(analytics_rep["segments"])
+                    c2.dataframe(seg_frame.drop(columns=["numeric_means"],
+                                                errors="ignore"),
+                                 width="stretch", hide_index=True)
+                if analytics_rep.get("lift_by_decile"):
+                    with st.expander("Lift by decile (labeled data)"):
+                        st.dataframe(pd.DataFrame(analytics_rep["lift_by_decile"]),
+                                     width="stretch", hide_index=True)
             st.dataframe(m_sel.summary_frame(), width="stretch")
             with st.expander("Cleaning report (the decision ledger)", expanded=True):
                 for line in m_sel.ledger_lines():
@@ -536,6 +555,113 @@ with tab_process:
                     pd.read_parquet(out_file).to_csv(index=False).encode(),
                     f"{run_pick}_{out_file.stem}.csv", "text/csv")
 
+with tab_journeys:
+    st.markdown("**Churn as stopping showing up.** Upload a raw event log (one row "
+                "per user activity) - retention is computed at your chosen time "
+                "grain with an inactivity window, sliced by any population filter, "
+                "with per-user churn-timing estimates. Still-active users are "
+                "censored, never miscounted as churned.")
+    upload_j = st.file_uploader("Event log (csv / parquet)",
+                                type=["csv", "parquet"], key="journeys_upload")
+    if upload_j is not None:
+        from phase_2.analytics import journeys as jn
+
+        events_j = (pd.read_csv(upload_j)
+                    if upload_j.name.endswith(".csv") else pd.read_parquet(upload_j))
+        cols = list(events_j.columns)
+        guess_user = next((c for c in cols if "user" in c.lower()
+                           or "id" in c.lower()), cols[0])
+        guess_ts = next((c for c in cols if pd.to_datetime(
+            events_j[c].head(20), errors="coerce").notna().mean() > 0.8), cols[-1])
+        c1, c2, c3, c4 = st.columns(4)
+        user_col_j = c1.selectbox("User column", cols, index=cols.index(guess_user))
+        ts_col_j = c2.selectbox("Timestamp column", cols, index=cols.index(guess_ts))
+        gran_j = c3.radio("Time grain", ["W", "M"], horizontal=True,
+                          format_func=lambda g: "Weekly" if g == "W" else "Monthly")
+        window_j = c4.number_input("Inactivity window (periods)", 1, 12, 2)
+        seg_options = ["(none)"] + [c for c in cols
+                                    if c not in (user_col_j, ts_col_j)
+                                    and events_j[c].nunique() <= 12]
+        seg_j = st.selectbox("Slice by population filter", seg_options)
+        seg_col = None if seg_j == "(none)" else seg_j
+
+        with st.spinner("Building journeys..."):
+            attrs = (events_j[[user_col_j, seg_col]].drop_duplicates(user_col_j)
+                     if seg_col else None)
+            jframe = jn.build_journeys(events_j, user_col_j, ts_col_j,
+                                       granularity=gran_j,
+                                       inactivity_window=int(window_j),
+                                       attributes=attrs)
+            outlook = jn.individual_outlook(jframe, segment_col=seg_col)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Users", f"{len(jframe):,}")
+        m2.metric("Churned", f"{jframe['churned'].mean():.1%}")
+        m3.metric("At risk (gap started)",
+                  f"{(jframe['journey_status'] == 'at_risk').mean():.1%}")
+        timing = jn.churn_timing(jframe)
+        if len(timing):
+            m4.metric("Most common churn period",
+                      f"period {int(timing.idxmax())}")
+
+        c1, c2 = st.columns(2)
+        # retention curves: overall + segments (capped to the 4 largest)
+        fig, ax = plt.subplots(figsize=(7, 4))
+        overall = jn.retention_curve(jframe)
+        ax.plot(overall.index, overall.values, color="#1a1a1a", linewidth=2.2,
+                label="all users")
+        if seg_col:
+            curves = jn.retention_by_segment(jframe, seg_col)
+            top_segs = (jframe[seg_col].value_counts().head(4).index.astype(str))
+            for seg, color in zip(top_segs, PALETTE):
+                if seg in curves:
+                    ax.plot(curves[seg].index, curves[seg].values,
+                            color=color, linewidth=2, label=seg)
+        ax.set_xlabel(f"Journey period ({'weeks' if gran_j == 'W' else 'months'})")
+        ax.set_ylabel("Still engaged")
+        ax.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
+        ax.set_title("Retention by journey period", loc="left",
+                     fontweight="bold", fontsize=10)
+        ax.legend(frameon=False, fontsize=9)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        fig.tight_layout()
+        c1.pyplot(fig)
+
+        if len(timing):
+            fig2, ax2 = plt.subplots(figsize=(7, 4))
+            ax2.bar(timing.index, timing.values, color=PALETTE[0])
+            ax2.set_xlabel(f"Journey period of churn "
+                           f"({'week' if gran_j == 'W' else 'month'} they went silent)")
+            ax2.set_ylabel("Users")
+            ax2.set_title("When in the journey users churn", loc="left",
+                          fontweight="bold", fontsize=10)
+            for side in ("top", "right"):
+                ax2.spines[side].set_visible(False)
+            fig2.tight_layout()
+            c2.pyplot(fig2)
+
+        if seg_col:
+            st.markdown(f"**Segment comparison - by `{seg_col}`**")
+            st.dataframe(jn.segment_summary(jframe, seg_col),
+                         width="stretch", hide_index=True)
+
+        st.markdown("**Individual outlook**")
+        pick = st.selectbox("Inspect a user", outlook["user"].astype(str))
+        row = outlook[outlook["user"].astype(str) == pick].iloc[0]
+        i1, i2, i3, i4 = st.columns(4)
+        i1.metric("Status", row["journey_status"])
+        i2.metric("Journey age", f"{int(row['periods_survived'])} periods")
+        exp_rem = row["expected_remaining_periods"]
+        i3.metric("Expected remaining",
+                  "beyond data horizon" if pd.isna(exp_rem) else f"~{exp_rem} periods")
+        est = row["estimated_churn_period"]
+        i4.metric("Estimated churn period",
+                  "unknown" if pd.isna(est) else f"period {est:.0f}")
+        st.download_button("Download per-user outlook (CSV)",
+                           outlook.to_csv(index=False).encode(),
+                           "journey_outlook.csv", "text/csv")
+
 with tab_target:
     st.markdown(
         "Uplift needs **campaign data**: a `treatment_group` column (who got the "
@@ -544,8 +670,61 @@ with tab_target:
         "the outcome, which is what the budget should chase.")
     if not pipeline.artifact_exists("uplift_model"):
         st.warning("Uplift artifact not trained yet - run notebook 03.")
-    st.caption("Upload a file with treatment_group + conversion + the campaign "
-               "features in the Score tab; uplift scores appear automatically.")
+    else:
+        upload_t = st.file_uploader(
+            "Campaign file (treatment_group + conversion + campaign features)",
+            type=["csv", "parquet"], key="target_upload")
+        if upload_t is not None:
+            df_t = (pd.read_csv(upload_t) if upload_t.name.endswith(".csv")
+                    else pd.read_parquet(upload_t))
+            rep_t = pipeline.validate(df_t)
+            if not rep_t["lenses"]["C"]["ok"]:
+                st.error(f"Lens C: {rep_t['lenses']['C']['message']}")
+            else:
+                scored_t, run_rep = pipeline.score(df_t)
+                if "uplift_score" not in scored_t.columns:
+                    st.error("Uplift scoring failed: "
+                             + str(run_rep.get("errors", {}).get("C",
+                                   "features do not match the trained model")))
+                else:
+                    up = scored_t["uplift_score"]
+                    top_n = max(1, len(up) // 10)
+                    persuadable = scored_t.nlargest(top_n, "uplift_score")
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Customers scored", f"{len(scored_t):,}")
+                    m2.metric("Mean uplift", f"{up.mean():+.3f}")
+                    m3.metric("Top-decile mean uplift",
+                              f"{persuadable['uplift_score'].mean():+.3f}")
+                    sleeping = int((up < -0.01).sum())
+                    m4.metric("Sleeping dogs (negative uplift)", f"{sleeping:,}")
+
+                    c1, c2 = st.columns(2)
+                    fig_u, ax_u = plt.subplots(figsize=(6, 3))
+                    ax_u.hist(up, bins=40, color=PALETTE[0])
+                    ax_u.axvline(0, color=CONTEXT_COLOR, linestyle="--", linewidth=1)
+                    ax_u.set_xlabel("Predicted uplift (change in conversion "
+                                    "probability if contacted)")
+                    ax_u.set_ylabel("Customers")
+                    ax_u.set_title("Who the offer actually changes", loc="left",
+                                   fontweight="bold", fontsize=10)
+                    for side in ("top", "right"):
+                        ax_u.spines[side].set_visible(False)
+                    fig_u.tight_layout()
+                    c1.pyplot(fig_u)
+                    c2.markdown("**The persuadables (top decile by uplift)** - "
+                                "this is the campaign call list:")
+                    c2.dataframe(persuadable.head(10)[
+                        [c for c in ("treatment_group", "conversion",
+                                     "uplift_score") if c in persuadable.columns]],
+                        width="stretch")
+                    st.download_button(
+                        "Download persuadables list (CSV)",
+                        persuadable.to_csv(index=False).encode(),
+                        "persuadables.csv", "text/csv")
+                    st.caption("Read the histogram: right tail = persuadables "
+                               "(spend here); around zero = sure things and lost "
+                               "causes (money wasted); left of zero = sleeping "
+                               "dogs (contacting them CAUSES churn).")
 
 st.divider()
 st.markdown("##### About the data behind these predictions")

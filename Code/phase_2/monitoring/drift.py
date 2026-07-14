@@ -112,6 +112,14 @@ def assess(df: pd.DataFrame, dataset_id: str) -> dict | None:
     if not artifact_exists("drift_baseline", dataset_id=dataset_id):
         return None
     baseline = load_model("drift_baseline", dataset_id=dataset_id)
+    # replay datetime-derived training features so they are not falsely
+    # reported as 'missing' drift (lazy import avoids a package cycle)
+    derived = {c: c[:-5] for c in baseline["features"]
+               if c.endswith("_days") and c not in df.columns
+               and c[:-5] in df.columns}
+    if derived:
+        from ..training import leakage
+        df = leakage.derive_datetime_features(df, derived)
     table = compare(df, baseline)
     alerts = table.loc[table["status"].isin(("alert", "missing")), "feature"].tolist()
     warns = table.loc[table["status"] == "warn", "feature"].tolist()

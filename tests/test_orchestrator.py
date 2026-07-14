@@ -4,6 +4,7 @@ All offline: Ollama mocked away, artifacts absent (score stage must SKIP,
 not fail). The live end-to-end with real artifacts + real Ollama is a demo,
 not a unit test.
 """
+import pandas as pd
 import pytest
 
 from phase_1 import config
@@ -142,6 +143,21 @@ def test_train_mode_full_path(labeled_frame, registry):
     drift_rep = m3.data["reports"]["drift"]
     assert "spend" in drift_rep["alerts"]
     assert any("retraining recommended" in line for line in m3.ledger_lines())
+
+
+def test_train_mode_with_datetime_column(labeled_frame, registry):
+    """Regression (LilliaCare demo): a datetime column becomes a '<col>_days'
+    training feature - the score stage must replay that derivation."""
+    with_date = labeled_frame.assign(
+        InvoiceDate=pd.Series(pd.date_range("2023-01-01",
+                                            periods=len(labeled_frame)))
+        .dt.strftime("%Y-%m-%d"))
+    m = run_pipeline(with_date, "dated-source", autonomy_level=1,
+                     registry=registry, raise_on_error=True)
+    assert m.status == rm.RUN_COMPLETED
+    assert m.data["stages"]["score"]["status"] == rm.DONE
+    # derived features must not be falsely reported as 'missing' drift
+    assert m.data["reports"]["drift"]["alerts"] == []
 
 
 def test_failure_is_recorded_not_raised(bank_frame, registry, monkeypatch):
