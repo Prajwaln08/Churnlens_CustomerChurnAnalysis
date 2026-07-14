@@ -13,7 +13,7 @@ import zipfile
 
 import pandas as pd
 
-from . import config
+from .. import config
 
 TELCO_SERVICE_COLS = [
     "PhoneService", "MultipleLines", "OnlineSecurity", "OnlineBackup",

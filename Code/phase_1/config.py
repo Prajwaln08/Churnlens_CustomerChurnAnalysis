@@ -13,7 +13,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Code/src/config.py -> parents[0]=src, [1]=Code, [2]=project root
+# Code/phase_1/config.py -> parents[0]=phase_1, [1]=Code, [2]=project root
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -32,6 +32,8 @@ MEGAFON_CACHE = _path("MEGAFON_CACHE", "Dataset/megafon/megafon.parquet")
 
 PROCESSED_DIR = _path("PROCESSED_DATA_DIR", "Dataset/processed")
 MODEL_DIR = _path("MODEL_DIR", "models")
+RUNS_DIR = _path("RUNS_DIR", "runs")  # per-run manifests + outputs (phase 2)
+REGISTRY_DB = MODEL_DIR / "registry.sqlite"  # runs/sources/mappings metadata (phase 2)
 CONTRACTS_DIR = MODEL_DIR / "contracts"
 METRICS_FILE = MODEL_DIR / "metrics.json"
 

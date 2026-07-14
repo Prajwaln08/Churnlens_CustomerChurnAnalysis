@@ -21,7 +21,7 @@ from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, cross_v
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from . import config
+from .. import config
 
 
 # --------------------------------------------------------------------------

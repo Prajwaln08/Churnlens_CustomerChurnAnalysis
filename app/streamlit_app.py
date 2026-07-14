@@ -1,11 +1,11 @@
-"""ChurnLens - Streamlit UI over src/pipeline.py.
+"""ChurnLens - Streamlit UI over phase_1/pipeline.py.
 
 Run from the project root:
     streamlit run app/streamlit_app.py
 
 The app is a thin view layer: every decision (validation, lens detection,
-scoring) lives in Code/src/pipeline.py, so CLI, notebooks and UI can never
-disagree. Charts follow the project chart conventions (see src/eda.py):
+scoring) lives in Code/phase_1/pipeline.py, so CLI, notebooks and UI can never
+disagree. Charts follow the project chart conventions (see phase_1/eda.py):
 single hue for single-measure bars, direct value labels, labeled status
 zones, no dual axes.
 """
@@ -21,8 +21,11 @@ import streamlit as st
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "Code"))
 
-from src import bootstrap, pipeline  # noqa: E402
-from src.eda import CONTEXT_COLOR, PALETTE  # noqa: E402
+from phase_1 import bootstrap, pipeline  # noqa: E402
+from phase_1.visualization import CONTEXT_COLOR, PALETTE  # noqa: E402
+from phase_2 import profiler  # noqa: E402
+from phase_2.mapping import CANONICAL  # noqa: E402
+from phase_2.orchestration import Registry, RunManifest, run_pipeline  # noqa: E402
 
 st.set_page_config(page_title="ChurnLens", layout="wide")
 
@@ -279,7 +282,7 @@ def show_batch_result(scored: pd.DataFrame, report: dict) -> None:
                                   value_fmt="${:,.0f}"))
             st.caption("These are the first phone calls to make.")
 
-    st.dataframe(scored.head(100), use_container_width=True)
+    st.dataframe(scored.head(100), width="stretch")
     st.download_button("Download scored CSV",
                        scored.to_csv(index=False).encode(),
                        "scored.csv", "text/csv")
@@ -308,7 +311,8 @@ with st.sidebar:
             "A grey card means the provided data is missing the columns that "
             "lens needs - an explicit status, not an error.")
 
-tab_score, tab_target = st.tabs(["Score", "Targeting (uplift)"])
+tab_score, tab_integrate, tab_process, tab_target = st.tabs(
+    ["Score", "Integrate (new data)", "Process (runs)", "Targeting (uplift)"])
 
 with tab_score:
     if mode == "Single customer (what-if)":
@@ -336,6 +340,134 @@ with tab_score:
                         st.caption("Coercions: " + "; ".join(info["coercions"]))
             scored, report = pipeline.score_any(df)
             show_batch_result(scored, report)
+
+with tab_integrate:
+    st.markdown("Bring **any customer dataset** - the pipeline profiles it, proposes "
+                "a mapping to the canonical schema, and runs the staged flow. "
+                "Confirmed mappings are remembered per source.")
+    upload_i = st.file_uploader("Dataset (csv / xlsx / parquet)",
+                                type=["csv", "xlsx", "parquet"], key="integrate_upload")
+    df_i = None
+    if upload_i is not None:
+        suffix = Path(upload_i.name).suffix.lower()
+        df_i = (pd.read_csv(upload_i) if suffix == ".csv"
+                else pd.read_excel(upload_i) if suffix in (".xlsx", ".xls")
+                else pd.read_parquet(upload_i))
+        c1, c2 = st.columns(2)
+        source_i = c1.text_input("Source name (mappings are saved per source)",
+                                 value=Path(upload_i.name).stem)
+        level_i = c2.radio("Autonomy", [1, 0], horizontal=True,
+                           format_func=lambda v: "Level 1 - auto-pilot" if v == 1
+                           else "Level 0 - review mapping first")
+        known = Registry().latest_mapping(source_i) if source_i else None
+        if known is not None:
+            st.caption(f"Confirmed mapping v{known['version']} on file for "
+                       f"'{source_i}' - runs will reuse it without asking.")
+        with st.expander("Column profile (what the tool sees)"):
+            st.dataframe(profiler.summary_frame(profiler.profile_table(df_i)),
+                         width="stretch")
+
+        if st.button("Run pipeline", type="primary", disabled=not source_i):
+            st.session_state.pop("integ_pending", None)
+            with st.spinner("Running the staged pipeline (a new schema may take "
+                            "~1 min while the local LLM proposes the mapping)..."):
+                m = run_pipeline(df_i, source_i, autonomy_level=level_i)
+            if m.status == "paused":
+                st.session_state["integ_pending"] = {
+                    "proposal": m.data["reports"]["mapping_proposal"],
+                    "source": source_i, "run_id": m.run_id}
+            else:
+                st.session_state["integ_done"] = m.run_id
+
+        pending = st.session_state.get("integ_pending")
+        if pending and pending["source"] == source_i:
+            st.warning("Level 0 gate: review the proposed mapping, edit any target, "
+                       "then confirm. Quarantined columns stay excluded either way.")
+            prop = pending["proposal"]
+            edit_frame = pd.DataFrame(
+                [{"source": mp["source"], "target": mp["target"] or "",
+                  "confidence": mp["confidence"]} for mp in prop["mappings"]])
+            edited = st.data_editor(
+                edit_frame, hide_index=True, width="stretch",
+                disabled=["source", "confidence"],
+                column_config={"target": st.column_config.SelectboxColumn(
+                    "target (canonical)", options=[""] + sorted(CANONICAL))})
+            if prop.get("quarantine"):
+                st.caption("Quarantined (never applied): " + ", ".join(
+                    q["source"] for q in prop["quarantine"]))
+            if st.button("Confirm mapping & run", type="primary"):
+                by_source = {mp["source"]: mp for mp in prop["mappings"]}
+                confirmed_mappings = []
+                for _, row in edited.iterrows():
+                    orig = by_source[row["source"]]
+                    target = row["target"] or None
+                    kept = target == orig["target"]
+                    confirmed_mappings.append({
+                        "source": row["source"], "target": target,
+                        "confidence": orig["confidence"] if kept else 0.99,
+                        "value_map": orig["value_map"] if kept else None})
+                override = {"engine": "human-confirmed",
+                            "mappings": confirmed_mappings,
+                            "quarantine": prop.get("quarantine", [])}
+                with st.spinner("Running with the confirmed mapping..."):
+                    m = run_pipeline(df_i, source_i, autonomy_level=0,
+                                     proposal_override=override)
+                st.session_state.pop("integ_pending", None)
+                st.session_state["integ_done"] = m.run_id
+
+        done_id = st.session_state.get("integ_done")
+        if done_id:
+            try:
+                m_done = RunManifest.load(done_id)
+                status = m_done.status
+                (st.success if status == "completed" else st.error)(
+                    f"Run {done_id}: {status} - full detail in the Process tab.")
+                st.dataframe(m_done.summary_frame()[
+                    ["stage", "status", "elapsed_s", "rows_out", "notes"]],
+                    width="stretch")
+            except FileNotFoundError:
+                st.session_state.pop("integ_done", None)
+
+with tab_process:
+    reg = Registry()
+    runs_frame = reg.all_runs()
+    if runs_frame.empty:
+        st.info("No runs yet - bring a dataset through the Integrate tab.")
+    else:
+        st.dataframe(runs_frame[["run_id", "source_name", "status", "rows",
+                                 "created_at", "finished_at"]],
+                     width="stretch")
+        run_pick = st.selectbox("Inspect run", runs_frame["run_id"])
+        try:
+            m_sel = RunManifest.load(run_pick)
+        except FileNotFoundError:
+            st.error("Manifest file missing for this run (runs/ was cleaned?).")
+            m_sel = None
+        if m_sel is not None:
+            st.markdown(f"**Status:** {m_sel.status} - source `{m_sel.data['source']}` "
+                        f"- autonomy level {m_sel.data['autonomy_level']}")
+            st.dataframe(m_sel.summary_frame(), width="stretch")
+            with st.expander("Cleaning report (the decision ledger)", expanded=True):
+                for line in m_sel.ledger_lines():
+                    st.text(line)
+            for name, payload in m_sel.data.get("reports", {}).items():
+                with st.expander(f"Report: {name}"):
+                    st.json(payload)
+            eda_files = [p for p in m_sel.data["stages"]["eda_report"]["artifacts"]
+                         if Path(p).exists()]
+            if eda_files:
+                st.markdown("**Data review charts**")
+                for chunk_start in range(0, len(eda_files), 2):
+                    cols = st.columns(2)
+                    for col, path in zip(cols, eda_files[chunk_start:chunk_start + 2]):
+                        col.image(path)
+            out_file = next((m_sel.run_dir / n for n in ("scored.parquet", "mapped.parquet")
+                             if (m_sel.run_dir / n).exists()), None)
+            if out_file is not None:
+                st.download_button(
+                    f"Download {out_file.stem} output (CSV)",
+                    pd.read_parquet(out_file).to_csv(index=False).encode(),
+                    f"{run_pick}_{out_file.stem}.csv", "text/csv")
 
 with tab_target:
     st.markdown(
@@ -369,5 +501,5 @@ st.markdown(
     "risk - are illustrative and intended to demonstrate the workflow, not to "
     "support decisions about real customers.\n"
     "- For production use, retrain the models on business-specific labeled "
-    "data: `python -m src.pipeline train --data <file>.csv`. The application "
+    "data: `python -m phase_1.serving.pipeline train --data <file>.csv`. The application "
     "loads the updated model automatically.")

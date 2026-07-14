@@ -23,6 +23,8 @@ __pycache__/
 Dataset/
 models/
 *.joblib
+runs/
+.pytest_cache/
 
 # OS
 .DS_Store

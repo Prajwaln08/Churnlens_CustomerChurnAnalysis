@@ -22,7 +22,7 @@ from sklearn.metrics import (
     precision_recall_curve,
 )
 
-from .eda import CONTEXT_COLOR, PALETTE
+from ..visualization.eda import CONTEXT_COLOR, PALETTE
 
 
 # --------------------------------------------------------------------------

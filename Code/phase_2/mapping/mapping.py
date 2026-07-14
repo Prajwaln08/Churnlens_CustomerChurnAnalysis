@@ -18,7 +18,7 @@ import re
 
 import pandas as pd
 
-from . import profiler
+from ..profiling import profiler
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")

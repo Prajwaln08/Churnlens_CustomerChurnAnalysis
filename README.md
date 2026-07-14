@@ -5,7 +5,8 @@ One tool, five questions about every customer base: **who** will leave, **when**
 
 Built as a complete data-science project: three public datasets, five modeling lenses,
 a leakage-safe scikit-learn pipeline, and a deployable scoring tool with a what-if UI -
-prototyped in notebooks, productionized into an importable `src/` package.
+prototyped in notebooks, productionized into importable packages (`phase_1` for the
+local analytics suite, `phase_2` for the growing production pipeline).
 
 > **Live demo:** _deploy in progress - link coming here_
 > **Portfolio:** _[add portfolio link]_
@@ -71,10 +72,13 @@ streamlit run app/streamlit_app.py
 
 # batch scoring from the CLI
 cd Code
-python -m src.pipeline score --input your_customers.csv
+python -m phase_1.serving.pipeline score --input your_customers.csv
 
 # retrain on new labeled data
-python -m src.pipeline train --data labeled.csv
+python -m phase_1.serving.pipeline train --data labeled.csv
+
+# run the test suite
+python -m pytest tests/ -q   # from the project root
 ```
 
 Full analysis: run the notebooks in order (`Code/01_...` to `Code/05_...`).
@@ -90,15 +94,25 @@ Code/
   03_feature_engineering_modeling.ipynb   # all five lenses trained
   04_result_analysis.ipynb       # thresholds, lift, error analysis, revenue-at-risk
   05_pipeline_tool.ipynb         # the tool proven on good, broken and foreign data
-  src/                           # the factory: promoted, importable modules
-    data_loader.py  eda.py  features.py  models.py
-    evaluation.py   pipeline.py  bootstrap.py  config.py
+  phase_1/                       # the local analytics suite (promoted from notebooks)
+    config.py
+    loader/          data_loader.py
+    preprocessing/   features.py
+    visualization/   eda.py
+    modeling/        models.py, bootstrap.py
+    evaluation/      evaluation.py
+    serving/         pipeline.py (contracts, validation, scoring, CLI)
+  phase_2/                       # the production pipeline (any dataset, staged runs)
+    profiling/       profiler.py
+    mapping/         mapping.py
+    orchestration/   run_manifest.py
+tests/                           # one test file per phase_2 module + shared fixtures
 app/streamlit_app.py             # ChurnLens UI (what-if + batch scoring)
 requirements.txt
 ```
 
 Workflow convention: every function was prototyped in a notebook first, then promoted
-to `src/` and imported from there - notebooks tell the story, `src/` ships it.
+to a package and imported from there - notebooks tell the story, packages ship it.
 
 ## Data
 
@@ -111,7 +125,7 @@ to `src/` and imported from there - notebooks tell the story, `src/` ships it.
 Datasets and trained artifacts are intentionally not committed; loaders and the
 bootstrap rebuild everything. All results are illustrative of the workflow and
 calibrated to these public datasets - production use requires retraining on
-business-specific data (`python -m src.pipeline train`).
+business-specific data (`python -m phase_1.serving.pipeline train`).
 
 ## Where it goes next
 

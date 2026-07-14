@@ -8,9 +8,9 @@ supported lens using the artifacts trained in notebook 03. Failures are named
 and human-readable; no silent column drops.
 
 CLI:
-    python -m src.pipeline score --input new_customers.csv --output scored.csv
-    python -m src.pipeline train --data labeled_telco.csv
-    python -m src.pipeline contracts
+    python -m phase_1.serving.pipeline score --input new_customers.csv --output scored.csv
+    python -m phase_1.serving.pipeline train --data labeled_telco.csv
+    python -m phase_1.serving.pipeline contracts
 """
 from __future__ import annotations
 
@@ -22,7 +22,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import config, features, models
+from .. import config
+from ..modeling import models
+from ..preprocessing import features
 
 # --------------------------------------------------------------------------
 # Schema contracts - the tool's public data requirements
@@ -153,7 +155,7 @@ def detect_lenses(df: pd.DataFrame) -> list[str]:
 def _coerce_telco(df: pd.DataFrame) -> pd.DataFrame:
     """Apply the same normalizations the training data got (data_loader.clean_telco),
     so raw exports score identically to cleaned ones."""
-    from .data_loader import TELCO_SERVICE_COLS
+    from ..loader.data_loader import TELCO_SERVICE_COLS
 
     out = df.copy()
     for col in ("tenure", "MonthlyCharges", "TotalCharges"):
@@ -325,7 +327,7 @@ def train_from_file(path: str | Path) -> dict:
     and the default pointer is updated, so the tool improves instead of aging."""
     from sklearn.metrics import roc_auc_score
 
-    from .data_loader import clean_telco
+    from ..loader.data_loader import clean_telco
 
     df = _read_any(Path(path))
     if not pd.api.types.is_numeric_dtype(df.get("Churn", pd.Series(dtype=object))):

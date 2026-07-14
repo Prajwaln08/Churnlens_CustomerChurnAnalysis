@@ -14,8 +14,10 @@ import io
 
 import pandas as pd
 
-from . import config, features, models
-from .data_loader import clean_telco
+from .. import config
+from ..loader.data_loader import clean_telco
+from ..preprocessing import features
+from . import models
 
 # IBM's public mirror of the Telco churn dataset (same columns as the zip).
 TELCO_URL = (

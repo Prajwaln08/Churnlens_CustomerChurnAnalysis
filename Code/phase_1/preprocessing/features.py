@@ -13,8 +13,8 @@ from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from . import config
-from .data_loader import TELCO_SERVICE_COLS
+from .. import config
+from ..loader.data_loader import TELCO_SERVICE_COLS
 
 TELCO_ID = "customerID"
 TELCO_TARGET = "Churn"
