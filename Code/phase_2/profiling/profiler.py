@@ -102,6 +102,25 @@ def label_candidates(profile: dict) -> list[str]:
     return named + other_binary
 
 
+def correlation_report(df: pd.DataFrame, threshold: float = 0.9,
+                       max_cols: int = 60) -> list[dict]:
+    """Highly correlated numeric pairs (|Pearson| >= threshold), strongest
+    first. Informational, not a gate: trees shrug at collinearity, but linear
+    coefficients and human interpretation deserve the warning. Capped at
+    max_cols columns to stay O(k^2)-cheap on wide data."""
+    numeric = df.select_dtypes("number").iloc[:, :max_cols]
+    if numeric.shape[1] < 2:
+        return []
+    corr = numeric.corr().abs()
+    cols = corr.columns
+    pairs = [
+        {"a": cols[i], "b": cols[j], "corr": round(float(corr.iloc[i, j]), 3)}
+        for i in range(len(cols)) for j in range(i + 1, len(cols))
+        if pd.notna(corr.iloc[i, j]) and corr.iloc[i, j] >= threshold
+    ]
+    return sorted(pairs, key=lambda p: -p["corr"])
+
+
 def summary_frame(profile: dict) -> pd.DataFrame:
     """Human-readable view of a profile (the Data Review table)."""
     rows = [

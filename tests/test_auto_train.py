@@ -41,6 +41,18 @@ def test_garbage_labels_fail_the_gate(labeled_frame):
     assert not (config.MODEL_DIR / "noise-source" / "churn_pipeline.joblib").exists()
 
 
+def test_cv_folds_option(labeled_frame):
+    """#3: k-fold CV decides winner and gate; report says which evaluation ran."""
+    report = auto_train.train_for_dataset(labeled_frame, "cv-source", cv_folds=5)
+    lens_a = report["lenses"]["A"]
+    assert lens_a["status"] == "promoted"
+    assert lens_a["evaluation"] == "5-fold stratified cv"
+    assert "cv_std" in lens_a and lens_a["cv_std"] < 0.15
+    # default path still reports its evaluation honestly
+    default = auto_train.train_for_dataset(labeled_frame, "holdout-source")
+    assert default["lenses"]["A"]["evaluation"] == "single stratified holdout (80/20)"
+
+
 def test_survival_skipped_without_duration(labeled_frame):
     no_tenure = labeled_frame.drop(columns=["tenure"])
     report = auto_train.train_for_dataset(no_tenure, "no-duration")

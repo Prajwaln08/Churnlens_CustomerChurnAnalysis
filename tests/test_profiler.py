@@ -30,6 +30,16 @@ def test_samples_are_masked():
     assert all(len(s) <= 17 for s in prof["columns"]["x"]["samples"])
 
 
+def test_correlation_report_finds_collinear_pairs(bank_frame):
+    """#4: near-duplicate numerics get named; independent ones stay quiet."""
+    df = bank_frame.copy()
+    df["fee_x2"] = df["monthly_fee"] * 2 + 0.01          # perfectly collinear
+    pairs = profiler.correlation_report(df, threshold=0.9)
+    assert any({p["a"], p["b"]} == {"monthly_fee", "fee_x2"} for p in pairs)
+    assert all(p["corr"] >= 0.9 for p in pairs)
+    assert profiler.correlation_report(bank_frame[["monthly_fee"]]) == []
+
+
 def test_summary_frame_covers_every_column(bank_frame):
     prof = profiler.profile_table(bank_frame)
     frame = profiler.summary_frame(prof)

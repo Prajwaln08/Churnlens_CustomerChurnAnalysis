@@ -31,10 +31,16 @@ KMEANS_KS = range(2, 7)
 
 
 def train_for_dataset(df: pd.DataFrame, dataset_id: str,
-                      label_col: str = "Churn", seed: int | None = None) -> dict:
+                      label_col: str = "Churn", seed: int | None = None,
+                      cv_folds: int | None = None) -> dict:
     """Train lens A (+ B when a duration exists, + D always) on all surviving
     columns. Returns a per-lens report; promoted artifacts land in
-    models/<dataset_id>/. Never raises for weak data - it reports."""
+    models/<dataset_id>/. Never raises for weak data - it reports.
+
+    cv_folds=None (default): fast single stratified 80/20 holdout.
+    cv_folds=k: k-fold stratified CV decides the winner AND the gate metric
+    (steadier estimate for small/noisy datasets); the winner refits on all rows.
+    """
     seed = config.RANDOM_SEED if seed is None else seed
     report: dict = {"dataset_id": dataset_id, "lenses": {}}
 
@@ -52,23 +58,40 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
                           "numeric": numeric}
 
     # ------------------------------------------------------------ lens A
-    stratify = y if y.nunique() == 2 and y.value_counts().min() >= 2 else None
-    X_tr, X_te, y_tr, y_te = train_test_split(
-        X, y, test_size=0.2, stratify=stratify, random_state=seed)
     candidates = {
         "logistic_regression": LogisticRegression(
             max_iter=2000, class_weight="balanced", random_state=seed),
         "hist_gradient_boosting": HistGradientBoostingClassifier(
             class_weight="balanced", random_state=seed),
     }
-    best_name, best_auc, best_pipe = None, 0.0, None
-    for name, est in candidates.items():
-        pipe = Pipeline([("prep", make_preprocessor(numeric, categorical,
-                                                    high_card)),
-                         ("clf", est)]).fit(X_tr, y_tr)
-        auc = roc_auc_score(y_te, pipe.predict_proba(X_te)[:, 1])
-        if auc > best_auc:
-            best_name, best_auc, best_pipe = name, auc, pipe
+    best_name, best_auc, best_pipe, cv_std = None, 0.0, None, None
+    if cv_folds:
+        from sklearn.model_selection import StratifiedKFold, cross_val_score
+
+        cv = StratifiedKFold(cv_folds, shuffle=True, random_state=seed)
+        for name, est in candidates.items():
+            pipe = Pipeline([("prep", make_preprocessor(numeric, categorical,
+                                                        high_card)),
+                             ("clf", est)])
+            scores = cross_val_score(pipe, X, y, scoring="roc_auc",
+                                     cv=cv, n_jobs=-1)
+            if scores.mean() > best_auc:
+                best_name, best_auc = name, float(scores.mean())
+                cv_std, best_pipe = float(scores.std()), pipe
+        best_pipe.fit(X, y)                     # winner refits on all rows
+        evaluation = f"{cv_folds}-fold stratified cv"
+    else:
+        stratify = y if y.nunique() == 2 and y.value_counts().min() >= 2 else None
+        X_tr, X_te, y_tr, y_te = train_test_split(
+            X, y, test_size=0.2, stratify=stratify, random_state=seed)
+        for name, est in candidates.items():
+            pipe = Pipeline([("prep", make_preprocessor(numeric, categorical,
+                                                        high_card)),
+                             ("clf", est)]).fit(X_tr, y_tr)
+            auc = roc_auc_score(y_te, pipe.predict_proba(X_te)[:, 1])
+            if auc > best_auc:
+                best_name, best_auc, best_pipe = name, auc, pipe
+        evaluation = "single stratified holdout (80/20)"
     promoted = best_auc >= GATE_AUC
     if promoted:
         save_model({"pipeline": best_pipe, "features": list(X.columns),
@@ -82,6 +105,8 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
     report["lenses"]["A"] = {
         "status": "promoted" if promoted else "trained_not_promoted",
         "model": best_name, "test_roc_auc": round(best_auc, 4),
+        "evaluation": evaluation,
+        **({"cv_std": round(cv_std, 4)} if cv_std is not None else {}),
         "gate": GATE_AUC,
         "reason": (f"test ROC-AUC {best_auc:.3f} >= gate {GATE_AUC}" if promoted
                    else f"test ROC-AUC {best_auc:.3f} below gate {GATE_AUC} - "

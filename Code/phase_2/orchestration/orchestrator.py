@@ -107,6 +107,13 @@ def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_over
             m.add_note("profile", f"label candidates: {', '.join(labels[:3])}")
         profiler.summary_frame(profile).to_csv(m.run_dir / "profile.csv", index=False)
         m.add_artifact("profile", m.run_dir / "profile.csv")
+        corr_pairs = profiler.correlation_report(df)
+        if corr_pairs:
+            m.attach_report("correlations", corr_pairs)
+            worst = ", ".join(f"{p['a']}~{p['b']} ({p['corr']})"
+                              for p in corr_pairs[:3])
+            m.add_note("profile", f"{len(corr_pairs)} highly correlated "
+                                  f"pair(s): {worst}")
         m.record("profile", rows_in=len(df), rows_out=len(df))
 
     # ---------------------------------------------------------------- map

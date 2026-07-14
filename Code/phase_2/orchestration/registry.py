@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS mappings (
     mapping_json TEXT NOT NULL,
     PRIMARY KEY (source_name, version)
 );
+CREATE TABLE IF NOT EXISTS watermarks (
+    source_name  TEXT PRIMARY KEY,
+    column_name  TEXT NOT NULL,
+    last_value   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
 """
 
 
@@ -122,6 +128,28 @@ class Registry:
         with self._connect() as con:
             return pd.read_sql_query(
                 "SELECT * FROM sources ORDER BY source_name", con)
+
+    # ------------------------------------------------------------------ watermarks
+
+    def get_watermark(self, source_name: str) -> dict | None:
+        """The last high-water mark for incremental ingestion, or None on the
+        first-ever fetch of a source."""
+        with self._connect() as con:
+            row = con.execute("SELECT * FROM watermarks WHERE source_name=?",
+                              (source_name,)).fetchone()
+        return dict(row) if row else None
+
+    def set_watermark(self, source_name: str, column_name: str,
+                      last_value: str, updated_at: str) -> None:
+        with self._connect() as con:
+            con.execute(
+                "INSERT INTO watermarks (source_name, column_name, last_value, "
+                "updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(source_name) DO UPDATE SET "
+                "column_name=excluded.column_name, last_value=excluded.last_value, "
+                "updated_at=excluded.updated_at",
+                (source_name, column_name, last_value, updated_at),
+            )
 
     # ------------------------------------------------------------------ mappings
 

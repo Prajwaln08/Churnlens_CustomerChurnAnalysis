@@ -33,6 +33,7 @@ class SourceData:
     origin: str
     fetched_at: str = field(default_factory=lambda: datetime.now(
         timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    watermark: str | None = None    # max value of the watermark column, if used
 
     @property
     def rows(self) -> int:
@@ -87,14 +88,25 @@ def from_dataframe(frame: pd.DataFrame, name: str = "dataframe") -> SourceData:
 # ---------------------------------------------------------------------------
 
 def from_database(url: str, table: str | None = None, query: str | None = None,
-                  limit: int | None = None) -> SourceData:
+                  limit: int | None = None, watermark_column: str | None = None,
+                  since=None) -> SourceData:
     """Pull a table or query result. `url` is an SQLAlchemy-style connection
     string (postgresql://..., mysql://..., snowflake://..., sqlite:///...).
     Predicate pushdown: prefer `query` with WHERE clauses over full tables.
+
+    Incremental ingestion: pass `watermark_column` (+ `since` from
+    Registry.get_watermark) and only rows with watermark_column > since are
+    fetched; the returned SourceData.watermark carries the new high-water mark
+    to persist via Registry.set_watermark.
     """
     if (table is None) == (query is None):
         raise ValueError("provide exactly one of `table` or `query`")
     sql = query or f"SELECT * FROM {table}"          # nosec - local analyst tool
+    params: dict = {}
+    if watermark_column and since is not None:
+        sql = (f"SELECT * FROM ({sql}) AS churnlens_wm "
+               f"WHERE {watermark_column} > :since")
+        params["since"] = since
     if limit is not None:
         sql = f"SELECT * FROM ({sql}) AS churnlens_sub LIMIT {int(limit)}"
 
@@ -102,7 +114,8 @@ def from_database(url: str, table: str | None = None, query: str | None = None,
         # stdlib path - zero extra deps for the most common local case
         db_file = url.split("///", 1)[-1]
         with sqlite3.connect(db_file) as con:
-            frame = pd.read_sql_query(sql, con)
+            frame = pd.read_sql_query(sql.replace(":since", "?"), con,
+                                      params=tuple(params.values()) or None)
     else:
         try:
             from sqlalchemy import create_engine, text
@@ -112,12 +125,15 @@ def from_database(url: str, table: str | None = None, query: str | None = None,
         engine = create_engine(url)
         try:
             with engine.connect() as con:
-                frame = pd.read_sql_query(text(sql), con)
+                frame = pd.read_sql_query(text(sql), con, params=params or None)
         finally:
             engine.dispose()
 
     origin = f"db:{redact_url(url)}#{table or 'query'}"
-    return SourceData(frame=frame, origin=origin)
+    watermark = None
+    if watermark_column and watermark_column in frame.columns and len(frame):
+        watermark = str(frame[watermark_column].max())
+    return SourceData(frame=frame, origin=origin, watermark=watermark)
 
 
 # ---------------------------------------------------------------------------

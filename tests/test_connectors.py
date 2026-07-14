@@ -2,7 +2,6 @@
 import json
 import sqlite3
 
-import pandas as pd
 import pytest
 
 from phase_2 import connectors
@@ -58,6 +57,36 @@ def test_from_database_sqlite_table_query_limit(bank_frame, tmp_path):
 
     with pytest.raises(ValueError, match="exactly one"):
         connectors.from_database(url)
+
+
+def test_watermark_incremental_fetch(bank_frame, tmp_path):
+    """#5: only rows past the high-water mark travel; the new mark rides back."""
+    db = tmp_path / "crm.sqlite"
+    with sqlite3.connect(db) as con:
+        bank_frame.to_sql("customers", con, index=False)
+    url = f"sqlite:///{db}"
+
+    first = connectors.from_database(url, table="customers",
+                                     watermark_column="months_active", since=-1)
+    assert first.rows == len(bank_frame)
+    assert first.watermark == str(bank_frame["months_active"].max())
+
+    incremental = connectors.from_database(url, table="customers",
+                                           watermark_column="months_active",
+                                           since=50)
+    assert incremental.rows == int((bank_frame["months_active"] > 50).sum())
+    assert (incremental.frame["months_active"] > 50).all()
+
+
+def test_watermark_state_roundtrip(tmp_path):
+    from phase_2.orchestration.registry import Registry
+
+    reg = Registry(db_path=tmp_path / "r.sqlite")
+    assert reg.get_watermark("crm") is None
+    reg.set_watermark("crm", "updated_at", "2026-07-01", "2026-07-15T10:00:00Z")
+    reg.set_watermark("crm", "updated_at", "2026-07-14", "2026-07-15T11:00:00Z")
+    mark = reg.get_watermark("crm")
+    assert mark["last_value"] == "2026-07-14"              # upserted, not duplicated
 
 
 def test_credentials_are_redacted():
