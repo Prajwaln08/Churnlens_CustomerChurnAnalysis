@@ -199,6 +199,10 @@ def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_over
                 m.add_note("train", f"excluded {col}: {reason}")
             m.add_note("train", f"features used: "
                                 f"{len(train_report['leakage']['kept'])}")
+            high_card = train_report.get("encoding", {}).get("frequency", [])
+            if high_card:
+                m.add_note("train", "high-cardinality columns frequency-"
+                                    "encoded: " + ", ".join(high_card))
             for lens, info in train_report["lenses"].items():
                 m.add_note("train", f"lens {lens}: {info['status']} - "
                                     f"{info['reason']}")

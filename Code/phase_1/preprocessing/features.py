@@ -8,9 +8,13 @@ why encoders/scalers live inside sklearn Pipelines rather than mutating frames.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from .. import config
@@ -56,14 +60,73 @@ def telco_feature_lists(df: pd.DataFrame) -> tuple[list[str], list[str]]:
     return numeric, categorical
 
 
-def make_preprocessor(numeric: list[str], categorical: list[str]) -> ColumnTransformer:
-    """Scale numerics, one-hot categoricals. Dense output (HGB/KMeans need it);
-    handle_unknown='ignore' keeps scoring robust to unseen categories."""
-    return ColumnTransformer([
-        ("num", StandardScaler(), numeric),
-        ("cat", OneHotEncoder(handle_unknown="ignore", drop="if_binary",
-                              sparse_output=False), categorical),
-    ])
+# one-hot beyond this many levels explodes dimensionality; frequency-encode instead
+MAX_OHE_LEVELS = 20
+
+
+class FrequencyEncoder(BaseEstimator, TransformerMixin):
+    """High-cardinality categorical -> its training frequency (one numeric
+    column per feature). Unsupervised, therefore leakage-safe by construction;
+    unseen values at scoring time map to 0.0 (i.e. 'never seen in training')."""
+
+    def fit(self, X, y=None):
+        frame = pd.DataFrame(X)
+        self.maps_ = [frame.iloc[:, i].astype(str).value_counts(normalize=True)
+                      .to_dict() for i in range(frame.shape[1])]
+        return self
+
+    def transform(self, X):
+        frame = pd.DataFrame(X)
+        return np.column_stack([
+            frame.iloc[:, i].astype(str).map(self.maps_[i]).fillna(0.0).values
+            for i in range(frame.shape[1])
+        ])
+
+    def get_feature_names_out(self, input_features=None):
+        n = len(self.maps_)
+        names = input_features if input_features is not None else range(n)
+        return np.asarray([f"freq_{name}" for name in list(names)[:n]], dtype=object)
+
+
+def split_categoricals(df: pd.DataFrame, categorical: list[str],
+                       max_levels: int = MAX_OHE_LEVELS) -> tuple[list[str], list[str]]:
+    """(low_cardinality, high_cardinality) - decides who gets one-hot and who
+    gets frequency encoding."""
+    low = [c for c in categorical if df[c].nunique() <= max_levels]
+    high = [c for c in categorical if c not in low]
+    return low, high
+
+
+def make_preprocessor(numeric: list[str], categorical: list[str],
+                      high_cardinality: list[str] = ()) -> ColumnTransformer:
+    """The dynamic preprocessor, hardened for arbitrary datasets:
+
+    - numerics: median-impute with MISSING-INDICATOR columns (missingness is
+      often signal), then scale;
+    - categoricals (low cardinality): impute an explicit 'missing' level, then
+      one-hot with handle_unknown='ignore' (unseen levels -> zeros, never a crash);
+    - high-cardinality categoricals: frequency-encode + scale (no dimension
+      explosion, leakage-safe).
+
+    Dense output throughout (HGB/KMeans need it).
+    """
+    transformers = [
+        ("num", Pipeline([
+            ("impute", SimpleImputer(strategy="median", add_indicator=True)),
+            ("scale", StandardScaler()),
+        ]), numeric),
+        ("cat", Pipeline([
+            ("impute", SimpleImputer(strategy="constant", fill_value="missing")),
+            ("encode", OneHotEncoder(handle_unknown="ignore", drop="if_binary",
+                                     sparse_output=False)),
+        ]), categorical),
+    ]
+    if high_cardinality:
+        transformers.append(("high_cat", Pipeline([
+            ("encode", FrequencyEncoder()),
+            ("scale", StandardScaler()),
+        ]), list(high_cardinality)))
+    return ColumnTransformer(transformers)
 
 
 def split_telco(

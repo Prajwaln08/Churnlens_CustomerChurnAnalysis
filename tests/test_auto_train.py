@@ -1,6 +1,5 @@
 """Tests for Code/phase_2/training/auto_train.py - gates over vibes."""
 import numpy as np
-import pandas as pd
 import pytest
 
 from phase_1 import config
@@ -47,6 +46,23 @@ def test_survival_skipped_without_duration(labeled_frame):
     report = auto_train.train_for_dataset(no_tenure, "no-duration")
     assert report["lenses"]["B"]["status"] == "skipped"
     assert "tenure" in report["lenses"]["B"]["reason"]
+
+
+def test_messy_real_world_data_trains_and_scores(labeled_frame):
+    """The hardening regression: NaNs + a 60-level categorical, end to end."""
+    rng = np.random.default_rng(2)
+    messy = labeled_frame.copy()
+    messy["city"] = rng.choice([f"city_{i}" for i in range(60)], len(messy))
+    messy.loc[rng.choice(len(messy), 60, replace=False), "spend"] = np.nan
+    messy.loc[rng.choice(len(messy), 60, replace=False), "plan"] = np.nan
+
+    report = auto_train.train_for_dataset(messy, "messy-source")
+    assert report["lenses"]["A"]["status"] == "promoted"
+    assert report["encoding"]["frequency"] == ["city"]     # not one-hot exploded
+    assert "plan" in report["encoding"]["one_hot"]
+
+    scored = auto_train.score_with_dataset_model(messy, "messy-source")
+    assert scored["churn_probability"].between(0, 1).all()
 
 
 def test_score_with_dataset_model_roundtrip(labeled_frame):

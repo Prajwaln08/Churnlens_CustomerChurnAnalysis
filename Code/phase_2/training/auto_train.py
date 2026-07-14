@@ -20,7 +20,7 @@ from sklearn.pipeline import Pipeline
 
 from phase_1 import config
 from phase_1.modeling import fit_kmeans_pipeline, kmeans_scan, save_model
-from phase_1.preprocessing import make_preprocessor
+from phase_1.preprocessing import make_preprocessor, split_categoricals
 
 from . import leakage
 
@@ -46,7 +46,10 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
     X = data[features]
     y = leakage._numeric_label(data[label_col]).astype(int)
     numeric = X.select_dtypes("number").columns.tolist()
-    categorical = [c for c in X.columns if c not in numeric]
+    categorical_all = [c for c in X.columns if c not in numeric]
+    categorical, high_card = split_categoricals(X, categorical_all)
+    report["encoding"] = {"one_hot": categorical, "frequency": high_card,
+                          "numeric": numeric}
 
     # ------------------------------------------------------------ lens A
     stratify = y if y.nunique() == 2 and y.value_counts().min() >= 2 else None
@@ -60,7 +63,8 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
     }
     best_name, best_auc, best_pipe = None, 0.0, None
     for name, est in candidates.items():
-        pipe = Pipeline([("prep", make_preprocessor(numeric, categorical)),
+        pipe = Pipeline([("prep", make_preprocessor(numeric, categorical,
+                                                    high_card)),
                          ("clf", est)]).fit(X_tr, y_tr)
         auc = roc_auc_score(y_te, pipe.predict_proba(X_te)[:, 1])
         if auc > best_auc:
@@ -93,10 +97,11 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
 
     # ------------------------------------------------------------ lens D
     try:
-        pre = make_preprocessor(numeric, categorical)
+        pre = make_preprocessor(numeric, categorical, high_card)
         scan = kmeans_scan(pre.fit_transform(X), ks=KMEANS_KS)
         k = int(scan.loc[scan["silhouette"].idxmax(), "k"])
-        km = fit_kmeans_pipeline(X, make_preprocessor(numeric, categorical), k)
+        km = fit_kmeans_pipeline(
+            X, make_preprocessor(numeric, categorical, high_card), k)
         save_model({"pipeline": km, "features": list(X.columns), "k": k},
                    "kmeans", dataset_id=dataset_id)
         report["lenses"]["D"] = {
