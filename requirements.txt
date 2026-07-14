@@ -16,3 +16,7 @@ lifetimes>=0.11        # Lens E: CLV (BG/NBD + Gamma-Gamma)
 
 # App / deployment (Phase 2)
 streamlit>=1.32
+
+# Production pipeline (Part 2)
+requests>=2.31       # Ollama API + bootstrap download (explicit, was transitive)
+pytest>=8.0          # test suite (Code/tests/)
