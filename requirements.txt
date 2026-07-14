@@ -18,5 +18,9 @@ lifetimes>=0.11        # Lens E: CLV (BG/NBD + Gamma-Gamma)
 streamlit>=1.32
 
 # Production pipeline (Part 2)
-requests>=2.31       # Ollama API + bootstrap download (explicit, was transitive)
-pytest>=8.0          # test suite (Code/tests/)
+requests>=2.31       # Ollama API + REST connector + bootstrap download
+pytest>=8.0          # test suite (tests/)
+sqlalchemy>=2.0      # database connector (Postgres/MySQL/Snowflake/SQLite)
+fastapi>=0.110       # REST serving door (phase_2/api/rest.py)
+uvicorn>=0.30        # ASGI server for the REST door
+mcp>=1.0             # agent serving door (phase_2/api/mcp_server.py)

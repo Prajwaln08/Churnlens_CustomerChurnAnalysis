@@ -265,8 +265,13 @@ def apply_mapping(df: pd.DataFrame, proposal: dict,
     (mapped frame, report). Nothing below min_confidence is applied; two
     sources claiming one target keeps the higher-confidence one."""
     quarantined = {q["source"] for q in proposal.get("quarantine", [])}
+    # a reused mapping may reference columns this frame does not carry
+    # (e.g. the label at scoring time) - absent sources are skipped, reported
+    absent = [m["source"] for m in proposal["mappings"]
+              if m["source"] not in df.columns]
     candidates = [m for m in proposal["mappings"]
                   if m["target"] and m["confidence"] >= min_confidence
+                  and m["source"] in df.columns
                   and m["source"] not in quarantined]
     candidates.sort(key=lambda m: -m["confidence"])
 
@@ -299,5 +304,6 @@ def apply_mapping(df: pd.DataFrame, proposal: dict,
         "unmapped": [m["source"] for m in proposal["mappings"] if not m["target"]],
         "quarantined": sorted(quarantined),
         "collisions_skipped": skipped_collisions,
+        "sources_absent": absent,
     }
     return out, report

@@ -23,7 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "Code"))
 
 from phase_1 import bootstrap, pipeline  # noqa: E402
 from phase_1.visualization import CONTEXT_COLOR, PALETTE  # noqa: E402
-from phase_2 import profiler  # noqa: E402
+from phase_2 import connectors, profiler  # noqa: E402
 from phase_2.mapping import CANONICAL  # noqa: E402
 from phase_2.orchestration import Registry, RunManifest, run_pipeline  # noqa: E402
 
@@ -342,20 +342,77 @@ with tab_score:
             show_batch_result(scored, report)
 
 with tab_integrate:
-    st.markdown("Bring **any customer dataset** - the pipeline profiles it, proposes "
-                "a mapping to the canonical schema, and runs the staged flow. "
-                "Confirmed mappings are remembered per source.")
-    upload_i = st.file_uploader("Dataset (csv / xlsx / parquet)",
-                                type=["csv", "xlsx", "parquet"], key="integrate_upload")
-    df_i = None
-    if upload_i is not None:
-        suffix = Path(upload_i.name).suffix.lower()
-        df_i = (pd.read_csv(upload_i) if suffix == ".csv"
-                else pd.read_excel(upload_i) if suffix in (".xlsx", ".xls")
-                else pd.read_parquet(upload_i))
+    st.markdown("Bring **any customer dataset** - file, database or API. The pipeline "
+                "profiles it, proposes a mapping to the canonical schema, and runs the "
+                "staged flow. Confirmed mappings are remembered per source.")
+    src_kind = st.radio("Source type", ["File upload", "Database", "REST API"],
+                        horizontal=True, key="integrate_kind")
+    payload = None          # SourceData or DataFrame handed to the pipeline
+    df_i = None             # the frame for profiling / editing
+    default_name = ""
+
+    if src_kind == "File upload":
+        upload_i = st.file_uploader("Dataset (csv / xlsx / parquet)",
+                                    type=["csv", "xlsx", "parquet"],
+                                    key="integrate_upload")
+        if upload_i is not None:
+            suffix = Path(upload_i.name).suffix.lower()
+            df_i = (pd.read_csv(upload_i) if suffix == ".csv"
+                    else pd.read_excel(upload_i) if suffix in (".xlsx", ".xls")
+                    else pd.read_parquet(upload_i))
+            payload = connectors.from_dataframe(df_i, name=upload_i.name)
+            default_name = Path(upload_i.name).stem
+
+    elif src_kind == "Database":
+        db_url = st.text_input(
+            "Connection string",
+            placeholder="postgresql://user:pass@host:5432/db   or   sqlite:///crm.db",
+            help="Credentials are used for this fetch only - never saved. "
+                 "Prefer keeping them in .env.")
+        c1, c2, c3 = st.columns([2, 2, 1])
+        db_table = c1.text_input("Table")
+        db_query = c2.text_input("...or SQL query (overrides table)")
+        db_limit = c3.number_input("Row limit (0 = all)", 0, value=0)
+        if st.button("Fetch from database",
+                     disabled=not (db_url and (db_table or db_query))):
+            try:
+                st.session_state["integ_src"] = connectors.from_database(
+                    db_url, table=(None if db_query else db_table or None),
+                    query=db_query or None, limit=db_limit or None)
+            except Exception as exc:
+                st.error(f"Fetch failed: {exc}")
+        fetched = st.session_state.get("integ_src")
+        if fetched is not None and fetched.origin.startswith("db:"):
+            st.success(f"Fetched {fetched.rows:,} rows from {fetched.origin}")
+            payload, df_i = fetched, fetched.frame
+            default_name = (db_table or "db-query").replace(" ", "-")
+
+    else:  # REST API
+        api_url = st.text_input("Endpoint URL",
+                                placeholder="https://api.example.com/v2/customers")
+        c1, c2, c3 = st.columns(3)
+        rec_path = c1.text_input("Records path", placeholder="data.items",
+                                 help="dot-path to the list of records; empty = root")
+        hdr_name = c2.text_input("Auth header name", placeholder="Authorization")
+        hdr_value = c3.text_input("Auth header value", type="password",
+                                  placeholder="Bearer ...")
+        if st.button("Fetch from API", disabled=not api_url):
+            try:
+                headers = {hdr_name: hdr_value} if hdr_name and hdr_value else None
+                st.session_state["integ_src"] = connectors.from_api(
+                    api_url, records_path=rec_path, headers=headers)
+            except Exception as exc:
+                st.error(f"Fetch failed: {exc}")
+        fetched = st.session_state.get("integ_src")
+        if fetched is not None and fetched.origin.startswith("api:"):
+            st.success(f"Fetched {fetched.rows:,} rows from {fetched.origin}")
+            payload, df_i = fetched, fetched.frame
+            default_name = api_url.rstrip("/").split("/")[-1] if api_url else "api"
+
+    if df_i is not None:
         c1, c2 = st.columns(2)
         source_i = c1.text_input("Source name (mappings are saved per source)",
-                                 value=Path(upload_i.name).stem)
+                                 value=default_name)
         level_i = c2.radio("Autonomy", [1, 0], horizontal=True,
                            format_func=lambda v: "Level 1 - auto-pilot" if v == 1
                            else "Level 0 - review mapping first")
@@ -371,7 +428,8 @@ with tab_integrate:
             st.session_state.pop("integ_pending", None)
             with st.spinner("Running the staged pipeline (a new schema may take "
                             "~1 min while the local LLM proposes the mapping)..."):
-                m = run_pipeline(df_i, source_i, autonomy_level=level_i)
+                m = run_pipeline(payload if payload is not None else df_i,
+                                 source_i, autonomy_level=level_i)
             if m.status == "paused":
                 st.session_state["integ_pending"] = {
                     "proposal": m.data["reports"]["mapping_proposal"],
@@ -410,7 +468,8 @@ with tab_integrate:
                             "mappings": confirmed_mappings,
                             "quarantine": prop.get("quarantine", [])}
                 with st.spinner("Running with the confirmed mapping..."):
-                    m = run_pipeline(df_i, source_i, autonomy_level=0,
+                    m = run_pipeline(payload if payload is not None else df_i,
+                                     source_i, autonomy_level=0,
                                      proposal_override=override)
                 st.session_state.pop("integ_pending", None)
                 st.session_state["integ_done"] = m.run_id
@@ -446,6 +505,14 @@ with tab_process:
         if m_sel is not None:
             st.markdown(f"**Status:** {m_sel.status} - source `{m_sel.data['source']}` "
                         f"- autonomy level {m_sel.data['autonomy_level']}")
+            narrative = m_sel.data.get("reports", {}).get("narrative")
+            if narrative:
+                st.info(narrative["summary"])
+                st.caption(f"summary by {narrative['engine']} - every figure "
+                           "audited against computed facts")
+            drift_rep = m_sel.data.get("reports", {}).get("drift")
+            if drift_rep and drift_rep.get("alerts"):
+                st.warning(f"Drift alert: {drift_rep['recommendation']}")
             st.dataframe(m_sel.summary_frame(), width="stretch")
             with st.expander("Cleaning report (the decision ledger)", expanded=True):
                 for line in m_sel.ledger_lines():

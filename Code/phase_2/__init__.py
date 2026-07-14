@@ -13,6 +13,9 @@ from .profiling import profiler
 from .mapping import mapping
 from .orchestration import orchestrator, registry, run_manifest
 from .training import auto_train, leakage, mode
+from .ingestion import connectors
+from .narration import narrator
+from .monitoring import drift
 
 __all__ = ["profiler", "mapping", "orchestrator", "registry", "run_manifest",
-           "auto_train", "leakage", "mode"]
+           "auto_train", "leakage", "mode", "connectors", "narrator", "drift"]

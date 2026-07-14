@@ -70,6 +70,11 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
         save_model({"pipeline": best_pipe, "features": list(X.columns),
                     "metrics": {"test_roc_auc": round(best_auc, 4)},
                     "model": best_name}, "churn_pipeline", dataset_id=dataset_id)
+        # drift baseline: the training data's distributions, for phase-6 checks
+        from ..monitoring import drift as drift_mod
+        save_model(drift_mod.build_baseline(X), "drift_baseline",
+                   dataset_id=dataset_id)
+        report["drift_baseline_saved"] = True
     report["lenses"]["A"] = {
         "status": "promoted" if promoted else "trained_not_promoted",
         "model": best_name, "test_roc_auc": round(best_auc, 4),
@@ -127,6 +132,34 @@ def _train_survival(data: pd.DataFrame, features: list[str], y: pd.Series,
                 "reason": f"C-index {c_index:.3f} below gate {GATE_C_INDEX}"}
     except Exception as exc:
         return {"status": "failed", "reason": str(exc)}
+
+
+def score_for_source(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
+    """Score RAW records for a trained source: replays the source's saved
+    (confirmed) mapping, cleaning, and derived features - the same recipe the
+    training run used - before predicting. This is the entry point for the
+    REST/MCP doors, where callers send unmapped data."""
+    from phase_1.serving.pipeline import _coerce_telco
+
+    from ..mapping import mapping as mapping_mod
+    from ..orchestration.registry import Registry
+    from . import leakage
+    from . import mode as mode_mod
+
+    dataset_id = mode_mod.dataset_id_for(source_name)
+    saved = Registry().latest_mapping(source_name)
+    frame = df
+    if saved is not None:
+        frame, _ = mapping_mod.apply_mapping(df, saved)
+    frame = _coerce_telco(frame)
+    from phase_1.modeling import load_model
+    bundle = load_model("churn_pipeline", dataset_id=dataset_id)
+    derived = {f: f[:-5] for f in bundle["features"]
+               if f.endswith("_days") and f not in frame.columns
+               and f[:-5] in frame.columns}
+    if derived:
+        frame = leakage.derive_datetime_features(frame, derived)
+    return score_with_dataset_model(frame, dataset_id)
 
 
 def score_with_dataset_model(df: pd.DataFrame, dataset_id: str) -> pd.DataFrame:

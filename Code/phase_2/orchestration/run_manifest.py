@@ -38,7 +38,9 @@ STAGES = (
     "mode",
     "train",
     "score",
+    "drift",
     "persist",
+    "narrate",
 )
 
 # stage statuses

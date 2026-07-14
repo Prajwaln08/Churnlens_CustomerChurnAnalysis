@@ -29,11 +29,12 @@ matplotlib.use("Agg")  # headless-safe everywhere (tests, CLI, Streamlit)
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from phase_1 import config
 from phase_1.serving import pipeline
 from phase_1.visualization import eda
 
 from ..mapping import mapping as mapping_mod
+from ..monitoring import drift as drift_mod
+from ..narration import narrator
 from ..profiling import profiler
 from ..training import auto_train
 from ..training import mode as mode_mod
@@ -82,10 +83,16 @@ def run_pipeline(
 def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_override):
     # ---------------------------------------------------------------- ingest
     with m.stage("ingest"):
+        origin, fetched_at = "dataframe", None
+        if hasattr(df, "frame"):                     # a connectors.SourceData
+            origin, fetched_at = df.origin, df.fetched_at
+            df = df.frame
         m.record("ingest", rows_in=len(df), rows_out=len(df))
         m.data["input"] = {"rows": len(df), "columns": df.shape[1],
-                           "content_hash": _content_hash(df)}
+                           "content_hash": _content_hash(df),
+                           "origin": origin, "fetched_at": fetched_at}
         m.add_note("ingest", f"received {len(df):,} rows x {df.shape[1]} columns "
+                             f"from {origin} "
                              f"(hash {m.data['input']['content_hash']})")
     registry.record_run(m.data)
 
@@ -230,6 +237,25 @@ def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_over
     else:
         m.skip("score", "explore mode - no label, nothing to score with")
 
+    # ---------------------------------------------------------------- drift
+    if decision["mode"] in (mode_mod.SCORE, mode_mod.TRAIN):
+        with m.stage("drift"):
+            drift_report = drift_mod.assess(cleaned, dataset_id)
+            if drift_report is None:
+                m.add_note("drift", "no baseline for this dataset - "
+                                    "drift check not possible (global-model "
+                                    "scores are not baselined)")
+            else:
+                m.attach_report("drift", drift_report)
+                if decision["mode"] == mode_mod.TRAIN:
+                    m.add_note("drift", "baseline established this run "
+                               f"(max PSI {drift_report['max_psi']})")
+                else:
+                    m.add_note("drift", drift_report["recommendation"]
+                               + f" (max PSI {drift_report['max_psi']})")
+    else:
+        m.skip("drift", "explore mode - no model, nothing to drift against")
+
     # ---------------------------------------------------------------- persist
     with m.stage("persist"):
         out = scored if scored is not None else cleaned
@@ -239,6 +265,18 @@ def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_over
         m.add_artifact("persist", out_path)
         m.add_note("persist", f"{len(out):,} rows -> {out_path.name}")
         m.record("persist", rows_in=len(out), rows_out=len(out))
+
+    # ---------------------------------------------------------------- narrate
+    with m.stage("narrate"):
+        # narrate is the final stage: every prior stage succeeded, so the
+        # run's true status is 'completed' even though finish() runs just after
+        narrative = narrator.narrate_run({**m.data, "status": "completed"},
+                                         scored, use_llm=use_llm)
+        m.attach_report("narrative", narrative)
+        m.add_note("narrate", f"summary written by {narrative['engine']}")
+        if narrative["audit_violations"]:
+            m.add_note("narrate", "audit rejected LLM figures: "
+                       + ", ".join(narrative["audit_violations"]))
 
     m.finish()
     registry.record_run(m.data)

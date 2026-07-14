@@ -127,11 +127,30 @@ bootstrap rebuild everything. All results are illustrative of the workflow and
 calibrated to these public datasets - production use requires retraining on
 business-specific data (`python -m phase_1.serving.pipeline train`).
 
-## Where it goes next
+## The production pipeline (phase_2) - any dataset, end to end
 
-A production design (maintained separately) extends this into a data-agnostic churn
-platform: connector-based ingestion (DB/API/files), deterministic profiling with
-local-LLM schema mapping (Ollama - data never leaves the machine), a
-score/train/explore mode decision per dataset, run manifests with full process
-visibility, drift monitoring, and an MCP tool layer so AI agents can operate the
-pipeline conversationally.
+The design above is implemented: `Code/phase_2/` is a data-agnostic churn platform
+that takes ANY customer dataset and runs a staged, fully-audited pipeline:
+
+```
+ingest -> profile -> map -> validate -> clean -> EDA -> mode -> train -> score -> drift -> persist -> narrate
+```
+
+- **Connectors** (files / SQL databases / REST APIs) all end at one internal shape;
+  credentials are redacted, predicate pushdown supported.
+- **Local-LLM schema mapping** (Ollama, qwen2.5:7b) - foreign column names and value
+  levels are mapped to the canonical schema; proposals are confidence-gated,
+  human-confirmable, saved per source and reused forever. Data never leaves the machine.
+- **Mode decision** per dataset - score with existing models, TRAIN fresh ones on all
+  surviving columns (leakage-screened, quality-gated: no model ships below its metric
+  bar), or explore label-free.
+- **Full observability** - every run writes a JSON manifest (stage checklist, timings,
+  a plain-English decision ledger) into a SQLite registry, rendered live in the app's
+  Process tab.
+- **Drift monitoring** - PSI against the training baseline; crossing the alert
+  threshold surfaces "retraining recommended".
+- **Grounded LLM narration** - run summaries written by the local model with a number
+  audit: any figure not present in the computed facts rejects the text entirely.
+- **Three doors, one engine**: the Streamlit app, a FastAPI service
+  (`uvicorn phase_2.api.rest:app`), and an MCP server so AI agents can operate the
+  pipeline conversationally (`python -m phase_2.api.mcp_server`).

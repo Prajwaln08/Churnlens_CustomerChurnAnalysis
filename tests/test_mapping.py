@@ -92,6 +92,21 @@ def test_apply_mapping_renames_translates_and_guards(bank_frame):
     assert bank_frame["agreement_type"].iloc[0] in {"monthly", "annual", "two-year"}  # input untouched
 
 
+def test_apply_mapping_tolerates_absent_source_columns(bank_frame):
+    """A reused mapping may reference the label column, which scoring data
+    legitimately lacks - must skip and report, never crash."""
+    no_label = bank_frame.drop(columns=["close_reason"])
+    prop = _proposal(mappings=[
+        {"source": "cust_ref", "target": "customerID", "confidence": 0.95, "value_map": None},
+        {"source": "close_reason", "target": "Churn", "confidence": 0.99,
+         "value_map": {"1": "Yes", "0": "No"}},
+    ], quarantine=[])
+    out, report = mapping.apply_mapping(no_label, prop)
+    assert "customerID" in out.columns
+    assert "Churn" not in out.columns
+    assert report["sources_absent"] == ["close_reason"]
+
+
 def test_apply_mapping_collision_keeps_higher_confidence(bank_frame):
     prop = _proposal(mappings=[
         {"source": "monthly_fee", "target": "MonthlyCharges", "confidence": 0.9, "value_map": None},
