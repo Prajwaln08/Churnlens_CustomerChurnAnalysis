@@ -62,16 +62,28 @@ st.markdown("""
 html, body, [class*="css"], .stMarkdown, p, span, label {
     font-family: 'IBM Plex Sans', system-ui, sans-serif; color: #16181d; }
 h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.02em; }
-.block-container { padding-top: 1.6rem; max-width: 1240px; }
+.block-container { padding-top: 1.6rem; max-width: 100%; padding-left: .8rem; padding-right: .8rem; }
 header[data-testid="stHeader"] { background: transparent; }
 section[data-testid="stSidebar"] { display: none; }
-.stTabs [data-baseweb="tab-list"] { gap: 2px; border-bottom: 1px solid #e6e3db; }
-.stTabs [data-baseweb="tab"] {
-    font-family: 'IBM Plex Sans', sans-serif; font-size: 14px; font-weight: 600;
-    color: #8a8e95; padding: 10px 16px; background: transparent; }
-.stTabs [aria-selected="true"] { color: #16181d; }
-.stTabs [data-baseweb="tab-highlight"] { background-color: #0173B2; height: 2.5px; }
-.stTabs [data-baseweb="tab-border"] { background: transparent; }
+.stTabs [role="tablist"] {
+    margin-top: 18px; display: flex; gap: 4px; background: #ecege2; border: 1px solid #e0ddd4;
+    border-radius: 12px; padding: 4px; width: 100%; }
+.stTabs [role="tablist"] [data-testid="stTab"] {
+    flex: 1; display: flex; align-items: center; justify-content: center; }
+.stTabs div[data-orientation="horizontal"] { border-bottom: 0 !important; }
+.stTabs [data-testid="stTab"] {
+    padding: 8px 18px; border-radius: 9px; border: 1px solid transparent;
+    background: transparent; cursor: pointer; transition: all .15s; }
+.stTabs [data-testid="stTab"] p {
+    font-family: 'IBM Plex Sans', sans-serif; font-size: 14.5px; font-weight: 600;
+    color: #8a8e95; margin: 0; line-height: 1.3; }
+.stTabs [data-testid="stTab"]:hover { background: #f4f2ec; }
+.stTabs [data-testid="stTab"]:hover p { color: #16181d; }
+.stTabs [data-testid="stTab"][aria-selected="true"] {
+    background: #ffffff; border: 1px solid #d9d5cc;
+    box-shadow: 0 1px 3px rgba(20,24,29,.10); }
+.stTabs [data-testid="stTab"][aria-selected="true"] p { color: #16181d; }
+.stTabs .react-aria-SelectionIndicator { display: none; }
 div[data-testid="stVerticalBlockBorderWrapper"] {
     background: #ffffff; border: 1px solid #e6e3db !important;
     border-radius: 16px; padding: 6px 10px; }
@@ -93,7 +105,7 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
 div[data-testid="stSegmentedControl"] button,
 div[data-testid="stPills"] button { border-radius: 16px; font-weight: 600; }
 div[data-testid="stDataFrame"] { border: 1px solid #eeebe3; border-radius: 10px; }
-.cl-kicker { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px;
+.cl-kicker { font-family: 'IBM Plex Mono', monospace; font-size: 12px;
     letter-spacing: .1em; text-transform: uppercase; color: #9a9ea6; font-weight: 600; }
 .cl-mono { font-family: 'IBM Plex Mono', monospace; }
 </style>
@@ -169,7 +181,7 @@ def section_head(lens: str, name: str, note: str) -> None:
          f'<div style="display:flex;align-items:baseline;gap:12px;">'
          f'<span class="cl-mono" style="font-size:12px;font-weight:600;'
          f'color:{LENS_COLOR.get(lens, INK)};">LENS {lens}</span>'
-         f'<span style="font-family:\'Space Grotesk\',sans-serif;font-size:18px;'
+         f'<span style="font-family:\'Space Grotesk\',sans-serif;font-size:21px;'
          f'font-weight:600;">{name}</span></div>'
          f'<span class="cl-mono" style="font-size:11.5px;color:{FAINT};">{note}</span></div>')
 
@@ -521,28 +533,37 @@ html(f'<div style="display:flex;align-items:center;gap:11px;margin-top:2px;">'
      f'position:relative;"><div style="position:absolute;width:6px;height:6px;'
      f'background:{RED};border-radius:50%;right:-4px;bottom:-4px;"></div></div>'
      f'<span style="font-family:\'Space Grotesk\',sans-serif;font-weight:700;'
-     f'font-size:28px;letter-spacing:-.02em;">ChurnLens</span></div>'
-     f'<div style="font-size:13px;color:{MUTED};max-width:560px;line-height:1.45;'
-     f'margin-top:6px;">Who leaves - when - who can be saved - which segment - what '
-     f'it costs.</div>'
-     f'<p style="font-size:13px;color:{MUTED};max-width:880px;line-height:1.65;'
+     f'font-size:34px;letter-spacing:-.02em;">ChurnLens</span></div>'
+     f'<p style="font-size:14px;color:{MUTED};line-height:1.65;'
      f'margin:12px 0 2px;">ChurnLens is a data-agnostic churn analytics tool: it turns '
      f'any customer dataset into retention decisions. Bring data from a file, database '
      f'or API - the pipeline profiles it, proposes a mapping to a canonical schema '
      f'(reviewable at a human gate), screens out leakage, trains models suited to the '
-     f'columns available, and opens a dashboard across five lenses: '
-     + " ".join(
-         f'<b class="cl-mono" style="color:{LENS_COLOR[k]};font-size:12px;">{k}</b> {d}'
-         for k, d in [("A", "who leaves,"), ("B", "when,"),
-                      ("C", "who can be saved,"), ("D", "which segment,"),
-                      ("E", "what it costs.")])
-     + ' Every step is auditable - cleaning decisions, quality gates and drift checks '
+     f'columns available, and opens a dashboard across five lenses:</p>'
+     f'<div style="display:flex;flex-wrap:wrap;gap:8px;margin:10px auto 12px;'
+     f'width:84%;justify-content:center;">'
+     + "".join(
+         f'<span style="display:inline-flex;align-items:center;justify-content:center;'
+         f'gap:8px;flex:1;min-width:150px;'
+         f'background:#fbfaf7;border:1px solid #e6e3db;border-radius:18px;'
+         f'padding:6px 14px;">'
+         f'<b class="cl-mono" style="color:{LENS_COLOR[k]};font-size:12.5px;">'
+         f'LENS {k}</b>'
+         f'<span style="font-size:12.5px;color:{INK};font-weight:600;">{label}'
+         f'</span></span>'
+         for k, label in [("A", "who leaves"), ("B", "when"),
+                          ("C", "who can be saved"), ("D", "which segment"),
+                          ("E", "what it costs")])
+     + f'</div>'
+     f'<p style="font-size:14px;color:{MUTED};line-height:1.65;margin:0 0 2px;">'
+     'Every step is auditable - cleaning decisions, quality gates and drift checks '
      'all land on a ledger - and the analytics run at both population and individual '
      'level.</p>')
 
+_lock = "" if has_completed else " :lock:"
 tab_whatif, tab_newdata, tab_process, tab_dash = st.tabs(
-    ["01  What-if", "02  Add your data", "03  Process",
-     "04  Dashboard" + ("" if has_completed else "  (locked)")])
+    ["01  What-if", "02  Add your data", f"03  Process{_lock}",
+     f"04  Dashboard{_lock}"])
 
 # ---------------------------------------------------------------------------
 # 01 WHAT-IF
@@ -666,10 +687,10 @@ def show_single_result(df: pd.DataFrame, scored: pd.DataFrame) -> None:
 with tab_whatif:
     with st.container(border=True):
         html('<div style="display:flex;justify-content:space-between;align-items:center;">'
-             '<span style="font-family:\'Space Grotesk\',sans-serif;font-size:17px;'
+             '<span style="font-family:\'Space Grotesk\',sans-serif;font-size:20px;'
              'font-weight:600;">Single customer - what-if</span>'
-             f'<span class="cl-mono" style="font-size:11.5px;color:{FAINT};">demo / test '
-             'account - IBM Telco training data</span></div>'
+             f'<span class="cl-mono" style="font-size:11.5px;color:{FAINT};">Models '
+             'trained on public IBM Telco customer data</span></div>'
              f'<p style="margin:2px 0 10px;font-size:13px;color:{MUTED};">Adjust a '
              'profile and score it against the fitted demo models - a test account to '
              'try the tool before integrating real data. Analytics for integrated data '
@@ -680,7 +701,7 @@ with tab_whatif:
         show_single_result(df_w, scored_w)
 
     # provenance footer - lives only on this tab
-    html('<div style="font-size:13px;font-weight:700;margin:26px 0 12px;">About the data '
+    html('<div style="font-size:16px;font-weight:700;margin:26px 0 12px;">About the data '
          'behind these predictions</div>')
     prov = [("Lens A / B / D", "IBM Telco Customer Churn",
              "7,043 customers, contract + services + charges."),
@@ -711,7 +732,7 @@ with tab_newdata:
     col_src, col_main = st.columns([1, 2.1], gap="medium")
 
     with col_src, st.container(border=True):
-        html('<span style="font-family:\'Space Grotesk\',sans-serif;font-size:16px;'
+        html('<span style="font-family:\'Space Grotesk\',sans-serif;font-size:19px;'
              'font-weight:600;">Add your data</span>'
              f'<p style="margin:2px 0 12px;font-size:12.5px;color:{MUTED};line-height:1.5;">'
              'Bring any customer dataset - file, database or API. The pipeline profiles '
@@ -990,7 +1011,7 @@ with tab_process:
     if runs_all.empty:
         st.info("No runs yet - bring a dataset through Add your data.")
     else:
-        html('<div style="font-size:15px;font-weight:700;margin-bottom:2px;">Runs registry'
+        html('<div style="font-size:18px;font-weight:700;margin-bottom:2px;">Runs registry'
              f'</div><div style="font-size:12px;color:{MUTED};margin-bottom:10px;">Every '
              'dataset that came through Add your data - completed, paused at a gate, or '
              'failed, all shown plainly.</div>')
@@ -1456,7 +1477,7 @@ with tab_dash:
                          f'<div class="cl-mono" style="font-size:12px;font-weight:600;'
                          f'color:#b57d09;margin-bottom:8px;">LENS C - NEEDS CAMPAIGN DATA'
                          f'</div><div style="font-family:\'Space Grotesk\',sans-serif;'
-                         f'font-size:18px;font-weight:600;margin-bottom:8px;">Uplift '
+                         f'font-size:21px;font-weight:600;margin-bottom:8px;">Uplift '
                          f'targeting works on an experiment log</div>'
                          f'<p style="margin:0 auto 14px;font-size:13px;color:#7a6410;'
                          f'max-width:560px;line-height:1.6;">Classification finds likely '
@@ -1682,7 +1703,7 @@ with tab_dash:
                          f'gap:12px;"><span class="cl-mono" style="font-size:12px;'
                          f'font-weight:600;color:{INK};">WHAT-IF</span>'
                          f'<span style="font-family:\'Space Grotesk\',sans-serif;'
-                         f'font-size:18px;font-weight:600;">Single customer</span></div>'
+                         f'font-size:21px;font-weight:600;">Single customer</span></div>'
                          f'<span class="cl-mono" style="font-size:11.5px;color:{FAINT};">'
                          f'scored with the {source} model, not the demo</span></div>')
                     dataset_id = training.get("dataset_id") or (
