@@ -1,20 +1,23 @@
-"""ChurnLens - Streamlit UI over phase_1/pipeline.py.
+"""ChurnLens - Streamlit UI over the phase_1 demo suite and phase_2 pipeline.
 
 Run from the project root:
     streamlit run app/streamlit_app.py
 
-The app is a thin view layer: every decision (validation, lens detection,
-scoring) lives in Code/phase_1/pipeline.py, so CLI, notebooks and UI can never
-disagree. Charts follow the project chart conventions (see phase_1/eda.py):
-single hue for single-measure bars, direct value labels, labeled status
-zones, no dual axes.
+Layout follows the ChurnLens design refresh: a top frame (logo, data source,
+five lens chips), four numbered tabs (01 What-if, 02 Add your data,
+03 Process, 04 Dashboard) and a lens-card drill navigation on the Dashboard.
+The app stays a thin view layer: every decision (validation, mapping,
+training, scoring) lives in Code/, so CLI, notebooks and UI cannot disagree.
 """
 from __future__ import annotations
 
+import base64
+import io
 import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -22,426 +25,830 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "Code"))
 
 from phase_1 import bootstrap, pipeline  # noqa: E402
-from phase_1.visualization import CONTEXT_COLOR, PALETTE  # noqa: E402
 from phase_2 import connectors, profiler  # noqa: E402
+from phase_2.analytics import insights as ins  # noqa: E402
+from phase_2.analytics import journeys as jn  # noqa: E402
 from phase_2.mapping import CANONICAL  # noqa: E402
+from phase_2.training import auto_train  # noqa: E402
 from phase_2.orchestration import Registry, RunManifest, run_pipeline  # noqa: E402
 
 st.set_page_config(page_title="ChurnLens", layout="wide")
 
-# Fresh deployments have no artifacts (models/ never enters git) - build the
-# demo models once from the public Telco dataset. No-op when artifacts exist.
+# ---------------------------------------------------------------------------
+# Design tokens (ChurnLens.dc.html)
+# ---------------------------------------------------------------------------
+
+INK = "#16181d"
+MUTED = "#6b6f76"
+FAINT = "#9a9ea6"
+PAPER = "#f4f2ec"
+CARD_LINE = "#e6e3db"
+BLUE = "#0173B2"
+GREEN = "#029E73"
+AMBER = "#DE8F05"
+RED = "#D55E00"
+CRIT = "#a83208"
+PURPLE = "#CC78BC"
+LENS_COLOR = {"A": RED, "B": BLUE, "C": GREEN, "D": PURPLE, "E": AMBER}
+BAND_COLOR = {"Low": GREEN, "Medium": AMBER, "High": RED, "Critical": CRIT}
+SEG_PALETTE = [BLUE, AMBER, RED, GREEN, PURPLE, "#949494"]
+
+st.markdown("""
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+.stApp { background: #f4f2ec; }
+html, body, [class*="css"], .stMarkdown, p, span, label {
+    font-family: 'IBM Plex Sans', system-ui, sans-serif; color: #16181d; }
+h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.02em; }
+.block-container { padding-top: 1.6rem; max-width: 1240px; }
+header[data-testid="stHeader"] { background: transparent; }
+section[data-testid="stSidebar"] { display: none; }
+.stTabs [data-baseweb="tab-list"] { gap: 2px; border-bottom: 1px solid #e6e3db; }
+.stTabs [data-baseweb="tab"] {
+    font-family: 'IBM Plex Sans', sans-serif; font-size: 14px; font-weight: 600;
+    color: #8a8e95; padding: 10px 16px; background: transparent; }
+.stTabs [aria-selected="true"] { color: #16181d; }
+.stTabs [data-baseweb="tab-highlight"] { background-color: #0173B2; height: 2.5px; }
+.stTabs [data-baseweb="tab-border"] { background: transparent; }
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    background: #ffffff; border: 1px solid #e6e3db !important;
+    border-radius: 16px; padding: 6px 10px; }
+.stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button,
+[data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primaryFormSubmit"] {
+    background: #16181d; color: #fff; border: none; border-radius: 10px;
+    font-weight: 600; padding: 0.55rem 1.5rem; }
+.stButton button[kind="primary"]:hover, [data-testid="stFormSubmitButton"] button:hover,
+[data-testid="stBaseButton-primary"]:hover,
+[data-testid="stBaseButton-primaryFormSubmit"]:hover {
+    background: #2c2f36; color: #fff; }
+[data-testid="stFormSubmitButton"] button p, .stButton button[kind="primary"] p,
+[data-testid="stBaseButton-primary"] p,
+[data-testid="stBaseButton-primaryFormSubmit"] p { color: #fff; }
+.stButton button[kind="secondary"] {
+    border: 1px solid #16181d; border-radius: 9px; background: none; font-weight: 600; }
+.stDownloadButton button {
+    border: 1px solid #16181d; border-radius: 9px; background: none; font-weight: 600; }
+div[data-testid="stSegmentedControl"] button,
+div[data-testid="stPills"] button { border-radius: 16px; font-weight: 600; }
+div[data-testid="stDataFrame"] { border: 1px solid #eeebe3; border-radius: 10px; }
+.cl-kicker { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px;
+    letter-spacing: .1em; text-transform: uppercase; color: #9a9ea6; font-weight: 600; }
+.cl-mono { font-family: 'IBM Plex Mono', monospace; }
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# First boot
+# ---------------------------------------------------------------------------
+
 if not bootstrap.artifacts_ready():
     with st.status("First boot: training demo models from the public Telco "
                    "dataset (about a minute)...", expanded=True) as _status:
         bootstrap.ensure_artifacts(progress=st.write)
         _status.update(label="Demo models ready.", state="complete")
 
-LENS_INFO = {
-    "A": ("Who churns", "churn probability per customer"),
-    "B": ("When", "expected remaining tenure"),
-    "C": ("Who to target", "uplift - who an offer can save"),
-    "D": ("Segments", "which customer group they belong to"),
-    "E": ("Revenue at stake", "customer lifetime value"),
-}
-
 # ---------------------------------------------------------------------------
-# Lens chips
+# HTML helpers - the design-system components
 # ---------------------------------------------------------------------------
 
-def lens_chips(report: dict) -> None:
-    """One card per lens: green = this data supports it, grey = it does not."""
-    cols = st.columns(len(LENS_INFO))
-    for col, (lens, (title, sub)) in zip(cols, LENS_INFO.items()):
-        info = report["lenses"][lens]
-        on = info["ok"] and info["artifact_available"]
-        if on:
-            style = "background:#e8f5ee;border:1.5px solid #029E73;color:#0b3d2e;"
-            status = "Available"
-        else:
-            style = "background:#f1f1f1;border:1.5px solid #cfcfcf;color:#9a9a9a;"
-            status = "Not available in this data"
-        col.markdown(
-            f'<div style="border-radius:10px;padding:10px 12px;min-height:108px;{style}">'
-            f'<div style="font-weight:700;font-size:0.88rem;">Lens {lens} - {title}</div>'
-            f'<div style="font-size:0.74rem;margin-top:2px;opacity:0.85;">{sub}</div>'
-            f'<div style="font-size:0.74rem;margin-top:8px;font-weight:600;">{status}</div>'
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+def html(s: str) -> None:
+    st.markdown(s, unsafe_allow_html=True)
+
+
+def tile(kicker: str, value: str, label: str = "", accent: str = CARD_LINE,
+         tag: str = "", tag_bg: str = RED, value_color: str = INK) -> str:
+    tag_html = ""
+    if tag:
+        tag_html = (f'<span style="display:inline-block;margin-top:9px;font-size:11px;'
+                    f'font-weight:700;color:#fff;background:{tag_bg};padding:3px 9px;'
+                    f'border-radius:20px;font-family:\'IBM Plex Mono\',monospace;">{tag}</span>')
+    label_html = (f'<div style="font-size:12px;color:{MUTED};line-height:1.4;">{label}</div>'
+                  if label else "")
+    return (f'<div style="background:#fbfaf7;border:1px solid #eeebe3;border-radius:12px;'
+            f'padding:13px 15px;border-top:3px solid {accent};height:100%;">'
+            f'<div class="cl-kicker">{kicker}</div>'
+            f'<div style="font-family:\'Space Grotesk\',sans-serif;font-size:26px;'
+            f'font-weight:600;letter-spacing:-.02em;margin:6px 0 2px;color:{value_color};'
+            f'line-height:1.1;">{value}</div>{label_html}{tag_html}</div>')
+
+
+def tile_row(tiles: list[str]) -> None:
+    n = len(tiles)
+    html(f'<div style="display:grid;grid-template-columns:repeat({n},1fr);gap:12px;'
+         f'margin-bottom:16px;">' + "".join(tiles) + "</div>")
+
+
+def banner(kind: str, title: str, body: str, credit: str = "") -> None:
+    styles = {
+        "info": ("#eef5fb", "#cfe2f0", BLUE, "#0b5573"),
+        "warn": ("#faf6e8", "#ece2c2", AMBER, "#7a6410"),
+        "ok": ("#eaf6ef", "#bfe3cf", GREEN, "#0a6b4c"),
+        "err": ("#fbeae4", "#f0cabb", RED, "#8a2f08"),
+    }
+    bg, line, edge, head = styles[kind]
+    credit_html = (f'<div style="font-size:11px;color:#7a7e85;margin-top:8px;'
+                   f'font-family:\'IBM Plex Mono\',monospace;">{credit}</div>' if credit else "")
+    html(f'<div style="background:{bg};border:1px solid {line};border-left:4px solid {edge};'
+         f'border-radius:11px;padding:13px 17px;margin-bottom:16px;">'
+         f'<span style="font-size:10.5px;font-weight:700;letter-spacing:.08em;'
+         f'text-transform:uppercase;color:{head};font-family:\'IBM Plex Mono\',monospace;">'
+         f'{title}</span>'
+         f'<p style="margin:4px 0 0;font-size:13.5px;line-height:1.6;color:{INK};">{body}</p>'
+         f'{credit_html}</div>')
+
+
+def rec_action(body: str) -> None:
+    banner("info", "Recommended action", body)
+
+
+def section_head(lens: str, name: str, note: str) -> None:
+    html(f'<div style="display:flex;align-items:baseline;justify-content:space-between;'
+         f'gap:12px;margin:2px 0 12px;flex-wrap:wrap;">'
+         f'<div style="display:flex;align-items:baseline;gap:12px;">'
+         f'<span class="cl-mono" style="font-size:12px;font-weight:600;'
+         f'color:{LENS_COLOR.get(lens, INK)};">LENS {lens}</span>'
+         f'<span style="font-family:\'Space Grotesk\',sans-serif;font-size:18px;'
+         f'font-weight:600;">{name}</span></div>'
+         f'<span class="cl-mono" style="font-size:11.5px;color:{FAINT};">{note}</span></div>')
+
+
+def lineage(powered: str, unlock: str) -> None:
+    html(f'<div style="border-top:1px dashed {CARD_LINE};padding-top:12px;margin-top:4px;'
+         f'display:grid;grid-template-columns:1fr 1fr;gap:14px;">'
+         f'<div style="font-size:11.5px;color:{MUTED};line-height:1.6;">'
+         f'<b class="cl-mono" style="color:#0a6b4c;font-size:10.5px;letter-spacing:.06em;">'
+         f'POWERED BY YOUR COLUMNS</b><br><span class="cl-mono">{powered}</span></div>'
+         f'<div style="font-size:11.5px;color:#9a8f6e;line-height:1.6;">'
+         f'<b class="cl-mono" style="color:#b57d09;font-size:10.5px;letter-spacing:.06em;">'
+         f'UNLOCK MORE</b><br>{unlock}</div></div>')
+
+
+def status_table(frame: pd.DataFrame, status_col: str = "status") -> None:
+    """Design-styled table with a colored status dot per row."""
+    dot = {"completed": GREEN, "done": GREEN, "paused": AMBER, "running": BLUE,
+           "failed": RED, "skipped": FAINT, "pending": "#d2cec4"}
+    heads = "".join(
+        f'<span style="flex:{2.2 if c == "notes" else (1.6 if c == "run_id" else 1)};">{c}</span>'
+        for c in frame.columns)
+    rows = []
+    for _, r in frame.iterrows():
+        cells = []
+        for c in frame.columns:
+            v = "-" if pd.isna(r[c]) else str(r[c])
+            if c == status_col:
+                color = dot.get(v, FAINT)
+                cells.append(
+                    f'<span style="flex:1;display:inline-flex;align-items:center;gap:6px;"'
+                    f' class="cl-mono"><span style="width:7px;height:7px;border-radius:50%;'
+                    f'background:{color};"></span><span style="font-size:11.5px;font-weight:600;'
+                    f'color:{color};">{v}</span></span>')
+            else:
+                flex = 2.2 if c == "notes" else (1.6 if c == "run_id" else 1)
+                style = ("font-size:11.5px;color:#6b6f76;line-height:1.4;" if c == "notes"
+                         else f'font-size:12px;color:{"#16181d" if c in ("stage", "run_id") else MUTED};')
+                mono = "" if c in ("notes", "source_name") else ' class="cl-mono"'
+                cells.append(f'<span style="flex:{flex};{style}overflow:hidden;'
+                             f'text-overflow:ellipsis;white-space:nowrap;padding-right:8px;"'
+                             f'{mono} title="{v}">{v}</span>')
+        rows.append('<div style="display:flex;padding:9px 16px;border-top:1px solid #f1efe8;'
+                    'align-items:center;">' + "".join(cells) + "</div>")
+    html('<div style="background:#fff;border:1px solid #e6e3db;border-radius:14px;'
+         'overflow:hidden;margin-bottom:14px;">'
+         '<div style="display:flex;background:#f7f5ef;padding:10px 16px;" class="cl-kicker">'
+         + heads + "</div>" + "".join(rows) + "</div>")
+
+
+def dark_ledger(lines: list[str]) -> None:
+    body = "".join(
+        f'<div class="cl-mono" style="font-size:12px;color:#c9cdd4;line-height:1.7;">{ln}</div>'
+        for ln in lines)
+    html(f'<div style="background:{INK};border-radius:14px;padding:16px 20px;margin-bottom:16px;">'
+         f'<div class="cl-kicker" style="color:#8a9098;margin-bottom:10px;">'
+         f'Cleaning report - decision ledger</div>{body}</div>')
+
+
+def fig_to_b64(fig) -> str:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight", transparent=True)
+    plt.close(fig)
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 # ---------------------------------------------------------------------------
-# Charts (matplotlib, project palette)
+# Charts - matplotlib, design palette
 # ---------------------------------------------------------------------------
+
+def _style_ax(ax, title: str = ""):
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color("#d9d5cc")
+    ax.tick_params(colors=MUTED, labelsize=8)
+    ax.xaxis.label.set_color(MUTED)
+    ax.yaxis.label.set_color(MUTED)
+    if title:
+        ax.set_title(title, loc="left", fontweight="bold", fontsize=10, color=INK)
+
+
+def _fig(w=6.0, h=3.0):
+    fig, ax = plt.subplots(figsize=(w, h))
+    fig.patch.set_alpha(0)
+    ax.set_facecolor("none")
+    return fig, ax
+
 
 def survival_chart(curve: pd.Series, tenure: float):
-    """Projected retention curve for one profile, with the 50/50 month marked."""
-    fig, ax = plt.subplots(figsize=(7, 3.1))
-    ax.plot(curve.index, curve.values, color=PALETTE[0], linewidth=2)
-    ax.fill_between(curve.index, curve.values, alpha=0.12, color=PALETTE[0])
+    fig, ax = _fig(7, 3.1)
+    ax.plot(curve.index, curve.values, color=BLUE, linewidth=2.4)
+    ax.fill_between(curve.index, curve.values, alpha=0.10, color=BLUE)
     below = curve[curve <= 0.5]
     if len(below):
         m = below.index[0]
-        ax.axvline(m, color=CONTEXT_COLOR, linestyle="--", linewidth=1)
-        ax.text(m + 1.2, 0.53, f"50/50 point: ~{m} mo", fontsize=8, color="#666666")
+        ax.axvline(m, color="#b3b0a7", linestyle="--", linewidth=1)
+        ax.text(m + 1.2, 0.53, f"50/50 point: ~{m} mo", fontsize=8, color=MUTED)
     if tenure and tenure > 0:
-        ax.axvline(tenure, color=PALETTE[1], linestyle=":", linewidth=1.5)
-        ax.text(tenure + 1.2, 0.92, f"today (month {tenure:.0f})",
-                fontsize=8, color=PALETTE[1])
+        ax.axvline(tenure, color=AMBER, linestyle=":", linewidth=1.5)
+        ax.text(tenure + 1.2, 0.92, f"today (month {tenure:.0f})", fontsize=8, color="#b57d09")
     ax.set_xlabel("Months from signup")
     ax.set_ylabel("P(still a customer)")
     ax.set_ylim(0, 1.02)
     ax.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
-    ax.set_title("Projected retention curve for this profile",
-                 loc="left", fontweight="bold", fontsize=10)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
+    _style_ax(ax)
     fig.tight_layout()
     return fig
 
 
-def counts_barh(series: pd.Series, title: str, value_fmt: str = "{:,.0f}"):
-    """Horizontal bar of counts/amounts: single hue, direct labels."""
-    fig, ax = plt.subplots(figsize=(6, 0.55 + 0.42 * len(series)))
-    labels = [str(i) for i in series.index]
-    ax.barh(labels, series.values, color=PALETTE[0], height=0.6)
-    for i, v in enumerate(series.values):
-        ax.text(v, i, "  " + value_fmt.format(v), va="center", fontsize=9,
-                color="#333333")
-    ax.invert_yaxis()
-    ax.set_xlim(0, max(series.values) * 1.3 if len(series) else 1)
-    ax.set_title(title, loc="left", fontweight="bold", fontsize=10)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    fig.tight_layout()
-    return fig
-
-
-def prob_histogram(proba: pd.Series):
-    """Distribution of churn probabilities across the uploaded base."""
-    fig, ax = plt.subplots(figsize=(6, 3))
-    ax.hist(proba, bins=25, color=PALETTE[0])
-    mean = float(proba.mean())
-    ax.axvline(mean, color=CONTEXT_COLOR, linestyle="--", linewidth=1.2)
-    ax.text(mean, ax.get_ylim()[1] * 0.95, f" mean {mean:.0%}", fontsize=8,
-            color="#666666")
+def population_hist(base: pd.Series, this_p: float | None = None):
+    fig, ax = _fig(6, 3)
+    ax.hist(base, bins=25, color=BLUE, alpha=0.88)
+    mean = float(base.mean())
+    ax.axvline(mean, color="#949494", linestyle="--", linewidth=1.2)
+    ax.text(mean + 0.01, ax.get_ylim()[1] * 0.93, f"mean {mean:.1%}", fontsize=8, color=MUTED)
+    if this_p is not None:
+        ax.axvline(this_p, color=RED, linestyle="--", linewidth=1.8)
+        ax.text(this_p - 0.01, ax.get_ylim()[1] * 0.80, f"this customer {this_p:.1%}",
+                fontsize=8, color=RED, ha="right", fontweight="bold")
     ax.set_xlabel("Churn probability")
     ax.set_ylabel("Customers")
-    ax.set_title("How risk is spread across this base",
-                 loc="left", fontweight="bold", fontsize=10)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
+    _style_ax(ax)
     fig.tight_layout()
     return fig
+
+
+def counts_barh(series: pd.Series, value_fmt: str = "{:,.0f}",
+                color: str | list = BLUE):
+    fig, ax = _fig(6, 0.55 + 0.42 * len(series))
+    labels = [str(i) for i in series.index]
+    ax.barh(labels, series.values, color=color, height=0.6)
+    for i, v in enumerate(series.values):
+        ax.text(v, i, "  " + value_fmt.format(v), va="center", fontsize=9, color="#333333")
+    ax.invert_yaxis()
+    ax.set_xlim(0, max(series.values) * 1.3 if len(series) else 1)
+    _style_ax(ax)
+    ax.set_xticks([])
+    fig.tight_layout()
+    return fig
+
+
+def band_donut(counts: dict[str, int]):
+    fig, ax = _fig(3.4, 3.4)
+    order = [b for b in ("Low", "Medium", "High", "Critical") if b in counts]
+    vals = [counts[b] for b in order]
+    colors = [BAND_COLOR[b] for b in order]
+    ax.pie(vals, colors=colors, startangle=90, counterclock=False,
+           wedgeprops={"width": 0.34, "edgecolor": "white", "linewidth": 1.5})
+    total = sum(vals)
+    ax.text(0, 0.06, f"{total:,}", ha="center", fontsize=15, fontweight="bold",
+            color=INK, family="sans-serif")
+    ax.text(0, -0.16, "customers", ha="center", fontsize=7.5, color=FAINT)
+    ax.legend(order, frameon=False, fontsize=8, loc="center left",
+              bbox_to_anchor=(0.98, 0.5), labelcolor=MUTED)
+    fig.tight_layout()
+    return fig
+
+
+def seg_pie(sizes: list[int], labels: list[str]):
+    fig, ax = _fig(4.4, 3.2)
+    ax.pie(sizes, colors=SEG_PALETTE[:len(sizes)], startangle=90, counterclock=False,
+           wedgeprops={"edgecolor": "white", "linewidth": 1.2})
+    total = sum(sizes)
+    legend = [f"{l} - {s / total:.0%}" for l, s in zip(labels, sizes)]
+    ax.legend(legend, frameon=False, fontsize=7.5, loc="center left",
+              bbox_to_anchor=(0.96, 0.5), labelcolor=MUTED)
+    fig.tight_layout()
+    return fig
+
+
+def km_chart(curves: dict[str, pd.Series], grain_label: str = "periods"):
+    fig, ax = _fig(7, 3.6)
+    palette = [INK] + [BLUE, AMBER, GREEN, PURPLE]
+    for (name, curve), color in zip(curves.items(), palette):
+        ax.step(curve.index, curve.values, where="post", color=color,
+                linewidth=2.4 if color == INK else 1.9, label=name)
+    ax.set_xlabel(f"Journey period ({grain_label})")
+    ax.set_ylabel("Still engaged")
+    ax.set_ylim(0, 1.02)
+    ax.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
+    ax.legend(frameon=False, fontsize=8, labelcolor=MUTED)
+    _style_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def timing_chart(timing: pd.Series, grain_label: str = "period"):
+    fig, ax = _fig(7, 3.6)
+    peak = timing.idxmax() if len(timing) else None
+    colors = [RED if peak is not None and abs(int(i) - int(peak)) <= 1 else AMBER
+              for i in timing.index]
+    ax.bar(timing.index, timing.values, color=colors, width=0.8)
+    ax.set_xlabel(f"Journey {grain_label} of churn (when they went silent)")
+    ax.set_ylabel("Customers")
+    _style_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def uplift_hist(up: pd.Series):
+    fig, ax = _fig(6.4, 3.2)
+    counts, edges, patches = ax.hist(up, bins=36)
+    for edge, patch in zip(edges[:-1], patches):
+        center = edge + (edges[1] - edges[0]) / 2
+        patch.set_facecolor(RED if center < -0.01 else ("#949494" if center <= 0.01 else GREEN))
+        patch.set_alpha(0.88)
+    ax.axvline(0, color=INK, linestyle="--", linewidth=1.2)
+    ax.set_xlabel("Predicted uplift (change in conversion probability if contacted)")
+    ax.set_ylabel("Customers")
+    _style_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def trend_chart(series: pd.Series):
+    fig, ax = _fig(6.4, 3.2)
+    ax.plot(range(len(series)), series.values, color=AMBER, linewidth=2.4, zorder=2)
+    ax.scatter(range(len(series)), series.values, color=AMBER, s=32, zorder=3)
+    for i, v in enumerate(series.values):
+        ax.annotate(f"${v / 1e6:.2f}M" if v >= 1e6 else f"${v / 1e3:.0f}K",
+                    (i, v), textcoords="offset points", xytext=(0, 9),
+                    ha="center", fontsize=8, color="#3a3e45", fontweight="bold")
+    ax.set_xticks(range(len(series)))
+    ax.set_xticklabels([str(i)[:16] for i in series.index], fontsize=7.5)
+    ax.margins(y=0.25)
+    ax.set_ylabel("Revenue at risk")
+    _style_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def spark_b64(series: pd.Series) -> str:
+    fig, ax = _fig(2.6, 0.9)
+    ax.plot(range(len(series)), series.values, color="#f0b35f", linewidth=2)
+    ax.scatter([len(series) - 1], [series.values[-1]], color="#f0b35f", s=22)
+    ax.axis("off")
+    return fig_to_b64(fig)
 
 
 # ---------------------------------------------------------------------------
-# What-if form
+# Data helpers
+# ---------------------------------------------------------------------------
+
+def _churn_bool(col: pd.Series) -> pd.Series:
+    as_num = pd.to_numeric(col, errors="coerce")
+    if as_num.notna().mean() > 0.9:
+        return as_num.fillna(0) > 0
+    return col.astype(str).str.strip().str.lower().isin(
+        ["yes", "true", "churned", "attrited", "1", "closed"])
+
+
+@st.cache_data(show_spinner=False)
+def load_run_bundle(run_id: str) -> dict | None:
+    try:
+        m = RunManifest.load(run_id)
+    except FileNotFoundError:
+        return None
+    scored_path = m.run_dir / "scored.parquet"
+    scored = pd.read_parquet(scored_path) if scored_path.exists() else None
+    return {"data": m.data, "run_dir": str(m.run_dir), "scored": scored,
+            "stage_frame": m.summary_frame(), "ledger": m.ledger_lines()}
+
+
+@st.cache_data(show_spinner=False)
+def rar_history(source: str) -> pd.Series:
+    """Total revenue at risk per completed run of this source, oldest first."""
+    runs = Registry().all_runs()
+    runs = runs[(runs["source_name"] == source) & (runs["status"] == "completed")]
+    totals = {}
+    for _, r in runs.iloc[::-1].iterrows():
+        try:
+            p = RunManifest.load(r["run_id"]).run_dir / "scored.parquet"
+            if p.exists():
+                rar = pd.read_parquet(p, columns=["revenue_at_risk"])
+                totals[str(r["created_at"])[:10]] = float(rar["revenue_at_risk"].sum())
+        except Exception:
+            continue
+    return pd.Series(totals)
+
+
+@st.cache_data(show_spinner=False)
+def telco_base_probabilities() -> pd.Series | None:
+    """Churn probabilities of the demo training base, for 'where this customer
+    sits in the population'. Skipped gracefully when the file is absent."""
+    base_path = PROJECT_ROOT / "Dataset" / "processed" / "telco_clean.parquet"
+    if not base_path.exists():
+        return None
+    try:
+        base = pd.read_parquet(base_path)
+        scored, _ = pipeline.score(base.drop(columns=["Churn"], errors="ignore"))
+        return scored["churn_probability"]
+    except Exception:
+        return None
+
+
+def completed_runs_with_scores() -> pd.DataFrame:
+    runs = Registry().all_runs()
+    if runs.empty:
+        return runs
+    return runs[runs["status"] == "completed"].reset_index(drop=True)
+
+
+def snapshot_journeys(scored: pd.DataFrame, slice_col: str | None) -> pd.DataFrame | None:
+    """Journey frame from the customer snapshot: duration = tenure, observed =
+    churn label. Reuses the phase_2 journeys engine (KM, censoring-aware)."""
+    if "tenure" not in scored.columns or "Churn" not in scored.columns:
+        return None
+    frame = pd.DataFrame({
+        "user": scored.get("customerID", pd.Series(scored.index.astype(str))).astype(str),
+        "duration": pd.to_numeric(scored["tenure"], errors="coerce").fillna(0).clip(lower=1).astype(int),
+        "churned": _churn_bool(scored["Churn"]),
+    })
+    frame["observed"] = frame["churned"]
+    frame["periods_survived"] = frame["duration"]
+    frame["churn_period"] = np.where(frame["churned"], frame["periods_survived"] + 1, np.nan)
+    frame["journey_status"] = np.where(frame["churned"], jn.CHURNED, jn.ACTIVE)
+    if slice_col and slice_col in scored.columns:
+        frame[slice_col] = scored[slice_col].astype(str).values
+    return frame
+
+
+def slice_options(scored: pd.DataFrame) -> list[str]:
+    skip = {"customerID", "Churn", "churn_probability", "risk_band", "segment",
+            "local_drivers", "expected_remaining_tenure", "clv_simple", "revenue_at_risk"}
+    return [c for c in scored.columns
+            if c not in skip and not pd.api.types.is_numeric_dtype(scored[c])
+            and 1 < scored[c].nunique() <= 12]
+
+
+def money(v: float) -> str:
+    if abs(v) >= 1e6:
+        return f"${v / 1e6:.2f}M"
+    if abs(v) >= 1e3:
+        return f"${v / 1e3:,.0f}K"
+    return f"${v:,.0f}"
+
+
+# ---------------------------------------------------------------------------
+# Top frame: logo, data source, lens chips, lens explainer
+# ---------------------------------------------------------------------------
+
+runs_all = Registry().all_runs()
+completed = completed_runs_with_scores()
+has_completed = not completed.empty
+
+html(f'<div style="display:flex;align-items:center;gap:11px;margin-top:2px;">'
+     f'<div style="width:18px;height:18px;border-radius:50%;border:3.5px solid {BLUE};'
+     f'position:relative;"><div style="position:absolute;width:6px;height:6px;'
+     f'background:{RED};border-radius:50%;right:-4px;bottom:-4px;"></div></div>'
+     f'<span style="font-family:\'Space Grotesk\',sans-serif;font-weight:700;'
+     f'font-size:28px;letter-spacing:-.02em;">ChurnLens</span></div>'
+     f'<div style="font-size:13px;color:{MUTED};max-width:560px;line-height:1.45;'
+     f'margin-top:6px;">Who leaves - when - who can be saved - which segment - what '
+     f'it costs.</div>'
+     f'<p style="font-size:13px;color:{MUTED};max-width:880px;line-height:1.65;'
+     f'margin:12px 0 2px;">ChurnLens is a data-agnostic churn analytics tool: it turns '
+     f'any customer dataset into retention decisions. Bring data from a file, database '
+     f'or API - the pipeline profiles it, proposes a mapping to a canonical schema '
+     f'(reviewable at a human gate), screens out leakage, trains models suited to the '
+     f'columns available, and opens a dashboard across five lenses: '
+     + " ".join(
+         f'<b class="cl-mono" style="color:{LENS_COLOR[k]};font-size:12px;">{k}</b> {d}'
+         for k, d in [("A", "who leaves,"), ("B", "when,"),
+                      ("C", "who can be saved,"), ("D", "which segment,"),
+                      ("E", "what it costs.")])
+     + ' Every step is auditable - cleaning decisions, quality gates and drift checks '
+     'all land on a ledger - and the analytics run at both population and individual '
+     'level.</p>')
+
+tab_whatif, tab_newdata, tab_process, tab_dash = st.tabs(
+    ["01  What-if", "02  Add your data", "03  Process",
+     "04  Dashboard" + ("" if has_completed else "  (locked)")])
+
+# ---------------------------------------------------------------------------
+# 01 WHAT-IF
 # ---------------------------------------------------------------------------
 
 def whatif_form() -> pd.DataFrame | None:
-    """Single-customer form: 'customer belongs to demographic X, has features Y'."""
     with st.form("whatif"):
-        st.subheader("Demographics")
-        c1, c2, c3, c4 = st.columns(4)
-        gender = c1.selectbox("Gender", ["Female", "Male"])
-        senior = c2.selectbox("Senior citizen", ["No", "Yes"])
-        partner = c3.selectbox("Partner", ["No", "Yes"])
-        dependents = c4.selectbox("Dependents", ["No", "Yes"])
-
-        st.subheader("Account & contract")
+        html('<div class="cl-kicker" style="margin:2px 0 10px;">Account &amp; contract</div>')
         c1, c2, c3, c4 = st.columns(4)
         tenure = c1.slider("Tenure (months)", 0, 72, 6)
         contract = c2.selectbox("Contract", ["Month-to-month", "One year", "Two year"])
-        paperless = c3.selectbox("Paperless billing", ["Yes", "No"])
-        payment = c4.selectbox("Payment method", [
-            "Electronic check", "Mailed check",
-            "Bank transfer (automatic)", "Credit card (automatic)"])
-
-        st.subheader("Services")
-        c1, c2, c3, c4 = st.columns(4)
-        phone = c1.selectbox("Phone service", ["Yes", "No"])
-        multiple = c2.selectbox("Multiple lines", ["No", "Yes"])
         internet = c3.selectbox("Internet service", ["Fiber optic", "DSL", "No"])
-        security = c4.selectbox("Online security", ["No", "Yes"])
-        c1, c2, c3, c4 = st.columns(4)
-        backup = c1.selectbox("Online backup", ["No", "Yes"])
-        protection = c2.selectbox("Device protection", ["No", "Yes"])
-        support = c3.selectbox("Tech support", ["No", "Yes"])
-        tv = c4.selectbox("Streaming TV", ["No", "Yes"])
-        c1, c2, c3 = st.columns(3)
-        movies = c1.selectbox("Streaming movies", ["No", "Yes"])
-        monthly = c2.number_input("Monthly charges ($)", 15.0, 150.0, 80.0, step=5.0)
-        total = c3.number_input("Total charges ($)", 0.0, 10000.0,
-                                float(monthly * max(tenure, 1)), step=50.0)
+        monthly = c4.slider("Monthly charges ($)", 15.0, 150.0, 80.0, step=5.0)
+
+        html('<div class="cl-kicker" style="margin:10px 0 6px;">Demographics &amp; services</div>')
+        t1, t2, t3, t4, t5, t6 = st.columns(6)
+        senior = t1.toggle("Senior citizen", value=False)
+        partner = t2.toggle("Partner", value=False)
+        dependents = t3.toggle("Dependents", value=False)
+        phone = t4.toggle("Phone service", value=True)
+        security = t5.toggle("Online security", value=False)
+        support = t6.toggle("Tech support", value=False)
+
+        with st.expander("More profile fields (defaults are sensible)"):
+            c1, c2, c3, c4 = st.columns(4)
+            gender = c1.selectbox("Gender", ["Female", "Male"])
+            paperless = c2.selectbox("Paperless billing", ["Yes", "No"])
+            payment = c3.selectbox("Payment method", [
+                "Electronic check", "Mailed check",
+                "Bank transfer (automatic)", "Credit card (automatic)"])
+            multiple = c4.selectbox("Multiple lines", ["No", "Yes"])
+            c1, c2, c3, c4 = st.columns(4)
+            backup = c1.selectbox("Online backup", ["No", "Yes"])
+            protection = c2.selectbox("Device protection", ["No", "Yes"])
+            tv = c3.selectbox("Streaming TV", ["No", "Yes"])
+            movies = c4.selectbox("Streaming movies", ["No", "Yes"])
+            total = st.number_input("Total charges ($)", 0.0, 12000.0,
+                                    float(monthly * max(tenure, 1)), step=50.0)
 
         if not st.form_submit_button("Score this customer", type="primary"):
             return None
+    yn = lambda b: "Yes" if b else "No"
     return pd.DataFrame([{
-        "gender": gender, "SeniorCitizen": senior, "Partner": partner,
-        "Dependents": dependents, "tenure": tenure, "PhoneService": phone,
+        "gender": gender, "SeniorCitizen": yn(senior), "Partner": yn(partner),
+        "Dependents": yn(dependents), "tenure": tenure, "PhoneService": yn(phone),
         "MultipleLines": multiple, "InternetService": internet,
-        "OnlineSecurity": security, "OnlineBackup": backup,
-        "DeviceProtection": protection, "TechSupport": support,
+        "OnlineSecurity": yn(security), "OnlineBackup": backup,
+        "DeviceProtection": protection, "TechSupport": yn(support),
         "StreamingTV": tv, "StreamingMovies": movies, "Contract": contract,
         "PaperlessBilling": paperless, "PaymentMethod": payment,
         "MonthlyCharges": monthly, "TotalCharges": total,
     }])
 
 
-# ---------------------------------------------------------------------------
-# Result views
-# ---------------------------------------------------------------------------
-
 def show_single_result(df: pd.DataFrame, scored: pd.DataFrame) -> None:
     row = scored.iloc[0]
-
-    c1, c2, c3, c4 = st.columns(4)
+    tiles = []
     if "churn_probability" in row:
-        c1.metric("Churn probability", f"{row['churn_probability']:.1%}",
-                  row.get("risk_band", ""), delta_color="off")
-        c1.caption("Lens A - how likely they are to leave")
+        p = float(row["churn_probability"])
+        band = str(row.get("risk_band", ""))
+        tiles.append(tile("Lens A - churn probability", f"{p:.1%}",
+                          "how likely they are to leave", accent=RED,
+                          value_color=RED if p >= 0.5 else INK,
+                          tag=band, tag_bg=BAND_COLOR.get(band, RED)))
     if "expected_remaining_tenure" in row:
-        c2.metric("Expected remaining tenure",
-                  f"{row['expected_remaining_tenure']:.0f} months")
-        c2.caption("Lens B - how long before they go")
+        tiles.append(tile("Lens B - remaining tenure",
+                          f"{row['expected_remaining_tenure']:.0f} mo",
+                          "expected time still a customer", accent=BLUE))
     if "clv_simple" in row:
-        c3.metric("Simplified CLV", f"${row['clv_simple']:,.0f}")
-        c3.caption("monthly bill x months remaining")
+        tiles.append(tile("Simplified CLV", f"${row['clv_simple']:,.0f}",
+                          "monthly bill x months remaining", accent=PURPLE))
     if "revenue_at_risk" in row:
-        c4.metric("Revenue at risk", f"${row['revenue_at_risk']:,.0f}")
-        c4.caption("probability x value - the headline")
+        tiles.append(tile("Headline - revenue at risk", f"${row['revenue_at_risk']:,.0f}",
+                          "probability x value", accent=INK))
+    if tiles:
+        tile_row(tiles)
 
+    seg_pill = ""
     if "segment" in row:
-        st.caption(f"Segment: cluster {row['segment']} (Lens D)")
-    if "recommended_action" in row:
-        st.info(f"**Recommended action:** {row['recommended_action']}")
+        seg_pill = (f'<span style="font-size:12.5px;font-weight:600;background:#f0eef8;'
+                    f'color:#8a5fb0;border:1px solid #e2daf0;padding:6px 13px;'
+                    f'border-radius:20px;">Segment - cluster {row["segment"]} (Lens D)</span>')
+    html(f'<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;'
+         f'margin-bottom:14px;">{seg_pill}<span style="font-size:12.5px;color:{MUTED};">'
+         f'This form has no campaign or purchase-history columns, so lenses C and E '
+         f'cannot run on it.</span></div>')
 
-    # retention curve last, and never allowed to break the page above it
+    if "recommended_action" in row and pd.notna(row["recommended_action"]):
+        rec_action(str(row["recommended_action"]))
+
     curves = None
     if hasattr(pipeline, "survival_curve"):
         try:
             curves = pipeline.survival_curve(df)
         except Exception:
             curves = None
+    c1, c2 = st.columns([1.2, 1])
     if curves is not None:
-        chart_col, _ = st.columns([3, 2])
-        chart_col.pyplot(survival_chart(curves.iloc[:, 0],
-                                        float(row.get("tenure", 0))))
-        chart_col.caption("Chance this profile is still a customer, month by "
-                          "month. Read where the curve crosses 50%.")
+        with c1, st.container(border=True):
+            html('<div style="font-size:14px;font-weight:700;">Chance this profile is '
+                 'still a customer, month by month</div>'
+                 f'<div style="font-size:12px;color:{MUTED};margin-bottom:6px;">Read where '
+                 'the curve crosses 50%. Lens B - expected remaining tenure.</div>')
+            st.pyplot(survival_chart(curves.iloc[:, 0], float(row.get("tenure", 0))))
+    base = telco_base_probabilities()
+    if base is not None and "churn_probability" in row:
+        p = float(row["churn_probability"])
+        pct = float((base < p).mean())
+        with c2, st.container(border=True):
+            html('<div style="font-size:14px;font-weight:700;">Where this customer sits '
+                 'in the population</div>'
+                 f'<div style="font-size:12px;color:{MUTED};margin-bottom:6px;">Risk '
+                 f'distribution of the {len(base):,} training customers.</div>')
+            st.pyplot(population_hist(base, p))
+            html(f'<div style="font-size:11.5px;color:{MUTED};line-height:1.5;">Population '
+                 f'mean churn probability is {base.mean():.1%}. At {p:.1%} this profile is '
+                 f'riskier than roughly {pct:.0%} of the base.</div>')
 
 
-def show_batch_result(scored: pd.DataFrame, report: dict) -> None:
-    st.success(f"Scored {len(scored):,} rows - lenses applied: "
-               f"{', '.join(report['applied']) or 'none'}")
-    if report["ignored_columns"]:
-        st.caption("Ignored columns (no lens uses them): "
-                   + ", ".join(report["ignored_columns"]))
-    for lens, err in report.get("errors", {}).items():
-        st.error(f"Lens {lens} failed: {err}")
 
-    # -- transaction-log view (lens E route)
-    if "E" in report["applied"] and "clv" in scored.columns:
-        c1, c2 = st.columns(2)
-        if "segment" in scored.columns:
-            seg = scored["segment"].value_counts()
-            c1.pyplot(counts_barh(seg, "Customers per RFM segment"))
-        clv_pos = scored.loc[scored["clv"] > 0, "clv"]
-        if len(clv_pos):
-            fig, ax = plt.subplots(figsize=(6, 3))
-            ax.hist(clv_pos, bins=40, color=PALETTE[0], log=True)
-            ax.set_xlabel("12-month CLV")
-            ax.set_ylabel("Customers (log scale)")
-            ax.set_title("Customer value distribution - note the whale tail",
-                         loc="left", fontweight="bold", fontsize=10)
-            for side in ("top", "right"):
-                ax.spines[side].set_visible(False)
-            fig.tight_layout()
-            c2.pyplot(fig)
-            c2.metric("Total 12-month CLV", f"£{scored['clv'].sum():,.0f}")
-    # -- customer-snapshot view (lenses A/B/D route)
-    else:
-        c1, c2 = st.columns(2)
-        if "risk_band" in scored.columns:
-            order = ["Low", "Medium", "High", "Critical"]
-            counts = (scored["risk_band"].value_counts()
-                      .reindex(order).dropna().astype(int))
-            c1.pyplot(counts_barh(counts, "Customers per risk band"))
-        if "churn_probability" in scored.columns:
-            c2.pyplot(prob_histogram(scored["churn_probability"]))
-        if "revenue_at_risk" in scored.columns:
-            st.metric("Total revenue at risk",
-                      f"${scored['revenue_at_risk'].sum():,.0f}")
-            top = scored.nlargest(10, "revenue_at_risk")
-            names = (top["customerID"] if "customerID" in top.columns
-                     else top.index.astype(str))
-            rar = pd.Series(top["revenue_at_risk"].values, index=names)
-            st.pyplot(counts_barh(rar, "Top 10 customers by revenue at risk",
-                                  value_fmt="${:,.0f}"))
-            st.caption("These are the first phone calls to make.")
+with tab_whatif:
+    with st.container(border=True):
+        html('<div style="display:flex;justify-content:space-between;align-items:center;">'
+             '<span style="font-family:\'Space Grotesk\',sans-serif;font-size:17px;'
+             'font-weight:600;">Single customer - what-if</span>'
+             f'<span class="cl-mono" style="font-size:11.5px;color:{FAINT};">demo / test '
+             'account - IBM Telco training data</span></div>'
+             f'<p style="margin:2px 0 10px;font-size:13px;color:{MUTED};">Adjust a '
+             'profile and score it against the fitted demo models - a test account to '
+             'try the tool before integrating real data. Analytics for integrated data '
+             'live in the Dashboard.</p>')
+        df_w = whatif_form()
+    if df_w is not None:
+        scored_w, _ = pipeline.score(df_w)
+        show_single_result(df_w, scored_w)
 
-    st.dataframe(scored.head(100), width="stretch")
-    st.download_button("Download scored CSV",
-                       scored.to_csv(index=False).encode(),
-                       "scored.csv", "text/csv")
-
+    # provenance footer - lives only on this tab
+    html('<div style="font-size:13px;font-weight:700;margin:26px 0 12px;">About the data '
+         'behind these predictions</div>')
+    prov = [("Lens A / B / D", "IBM Telco Customer Churn",
+             "7,043 customers, contract + services + charges."),
+            ("Lens C", "MegaFon Uplift Experiment",
+             "Randomized treatment/control campaign log."),
+            ("Lens E", "UCI Online Retail II",
+             "Transaction log for CLV and RFM segments.")]
+    cells = "".join(
+        f'<div style="background:#fbfaf7;border:1px solid #eeebe3;border-radius:11px;'
+        f'padding:13px 15px;"><div class="cl-mono" style="font-size:11px;color:{FAINT};'
+        f'font-weight:600;">{l}</div><div style="font-size:13px;font-weight:600;'
+        f'margin:3px 0 2px;">{n}</div><div style="font-size:11.5px;color:{MUTED};">{d}'
+        f'</div></div>' for l, n, d in prov)
+    html(f'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;'
+         f'margin-bottom:14px;">{cells}</div>')
+    html(f'<p style="font-size:11.5px;color:{FAINT};line-height:1.6;max-width:840px;">'
+         'Figures on this tab are illustrative, computed on public training datasets. '
+         'Model outputs are calibrated to the populations, prices and time periods of '
+         'those datasets and are intended to demonstrate the workflow, not to support '
+         'decisions about real customers. Bring business data through Add your data to '
+         'train fresh models - the Dashboard then reports on that data instead.</p>')
 
 # ---------------------------------------------------------------------------
-# Page
+# 02 ADD YOUR DATA
 # ---------------------------------------------------------------------------
 
-st.title("ChurnLens")
-st.caption("Who leaves - when - who can be saved - which segment - what it costs. "
-           "Upload customer data; the columns you provide decide which lenses can run.")
+with tab_newdata:
+    col_src, col_main = st.columns([1, 2.1], gap="medium")
 
-with st.sidebar:
-    mode = st.radio("Data source",
-                    ["Single customer (what-if)", "Batch file upload"])
-    with st.expander("What are the five lenses?"):
-        st.markdown(
-            "- **A - Who churns:** probability each customer leaves\n"
-            "- **B - When:** expected remaining time as a customer\n"
-            "- **C - Who to target:** whose churn an offer can prevent "
-            "(needs campaign data: treatment_group + conversion)\n"
-            "- **D - Segments:** natural customer groups\n"
-            "- **E - Revenue at stake:** customer lifetime value "
-            "(needs a transaction log: CustomerID + InvoiceDate + amounts)\n\n"
-            "A grey card means the provided data is missing the columns that "
-            "lens needs - an explicit status, not an error.")
+    with col_src, st.container(border=True):
+        html('<span style="font-family:\'Space Grotesk\',sans-serif;font-size:16px;'
+             'font-weight:600;">Add your data</span>'
+             f'<p style="margin:2px 0 12px;font-size:12.5px;color:{MUTED};line-height:1.5;">'
+             'Bring any customer dataset - file, database or API. The pipeline profiles '
+             'it, the local LLM proposes a mapping, models train - then the Dashboard '
+             'unlocks. Confirmed mappings are remembered per source.</p>')
+        src_kind = st.segmented_control("Source type", ["File", "Database", "REST API"],
+                                        default="File", key="integrate_kind")
+        payload = None
+        df_i = None
+        default_name = ""
 
-tab_score, tab_integrate, tab_process, tab_journeys, tab_target = st.tabs(
-    ["Score", "Integrate (new data)", "Process (runs)",
-     "Journeys (engagement churn)", "Targeting (uplift)"])
+        if src_kind == "File":
+            upload_i = st.file_uploader("Dataset (csv / xlsx / parquet)",
+                                        type=["csv", "xlsx", "parquet"],
+                                        key="integrate_upload")
+            if upload_i is not None:
+                suffix = Path(upload_i.name).suffix.lower()
+                df_i = (pd.read_csv(upload_i) if suffix == ".csv"
+                        else pd.read_excel(upload_i) if suffix in (".xlsx", ".xls")
+                        else pd.read_parquet(upload_i))
+                payload = connectors.from_dataframe(df_i, name=upload_i.name)
+                default_name = Path(upload_i.name).stem
 
-with tab_score:
-    if mode == "Single customer (what-if)":
-        df = whatif_form()
-        if df is not None:
-            lens_chips(pipeline.validate(df))
-            st.caption("Grey cards: this single-customer form has no campaign or "
-                       "purchase-history columns, so lenses C and E cannot run on it.")
-            scored, report = pipeline.score(df)
-            show_single_result(df, scored)
-    else:
-        upload = st.file_uploader("Customer snapshot or transaction log",
-                                  type=["csv", "xlsx", "parquet"])
-        if upload is not None:
-            suffix = Path(upload.name).suffix.lower()
-            df = (pd.read_csv(upload) if suffix == ".csv"
-                  else pd.read_excel(upload) if suffix in (".xlsx", ".xls")
-                  else pd.read_parquet(upload))
-            report = pipeline.validate(df)
-            lens_chips(report)
-            with st.expander("Validation detail - what was checked and why"):
-                for lens, info in report["lenses"].items():
-                    st.write(f"**Lens {lens} - {info['name']}:** {info['message']}")
-                    if info["coercions"]:
-                        st.caption("Coercions: " + "; ".join(info["coercions"]))
-            scored, report = pipeline.score_any(df)
-            show_batch_result(scored, report)
+        elif src_kind == "Database":
+            db_url = st.text_input(
+                "Connection string",
+                placeholder="postgresql://user:pass@host:5432/db  or  sqlite:///crm.db",
+                help="Credentials are used for this fetch only - never saved.")
+            db_table = st.text_input("Table")
+            db_query = st.text_input("...or SQL query (overrides table)")
+            db_limit = st.number_input("Row limit (0 = all)", 0, value=0)
+            html(f'<div style="font-size:11px;color:#9a8f6e;background:#faf6e8;'
+                 f'border:1px solid #ece2c2;border-radius:7px;padding:7px 9px;'
+                 f'margin-bottom:10px;">Credentials are used for this fetch only - '
+                 f'never saved.</div>')
+            if st.button("Fetch from database", type="primary",
+                         disabled=not (db_url and (db_table or db_query))):
+                try:
+                    st.session_state["integ_src"] = connectors.from_database(
+                        db_url, table=(None if db_query else db_table or None),
+                        query=db_query or None, limit=db_limit or None)
+                except Exception as exc:
+                    st.error(f"Fetch failed: {exc}")
+            fetched = st.session_state.get("integ_src")
+            if fetched is not None and fetched.origin.startswith("db:"):
+                st.success(f"Fetched {fetched.rows:,} rows from {fetched.origin}")
+                payload, df_i = fetched, fetched.frame
+                default_name = (db_table or "db-query").replace(" ", "-")
 
-with tab_integrate:
-    st.markdown("Bring **any customer dataset** - file, database or API. The pipeline "
-                "profiles it, proposes a mapping to the canonical schema, and runs the "
-                "staged flow. Confirmed mappings are remembered per source.")
-    src_kind = st.radio("Source type", ["File upload", "Database", "REST API"],
-                        horizontal=True, key="integrate_kind")
-    payload = None          # SourceData or DataFrame handed to the pipeline
-    df_i = None             # the frame for profiling / editing
-    default_name = ""
+        else:
+            api_url = st.text_input("Endpoint URL",
+                                    placeholder="https://api.example.com/v2/customers")
+            rec_path = st.text_input("Records path", placeholder="data.items",
+                                     help="dot-path to the list of records; empty = root")
+            h1, h2 = st.columns(2)
+            hdr_name = h1.text_input("Auth header name", placeholder="Authorization")
+            hdr_value = h2.text_input("Auth header value", type="password",
+                                      placeholder="Bearer ...")
+            if st.button("Fetch from API", type="primary", disabled=not api_url):
+                try:
+                    headers = {hdr_name: hdr_value} if hdr_name and hdr_value else None
+                    st.session_state["integ_src"] = connectors.from_api(
+                        api_url, records_path=rec_path, headers=headers)
+                except Exception as exc:
+                    st.error(f"Fetch failed: {exc}")
+            fetched = st.session_state.get("integ_src")
+            if fetched is not None and fetched.origin.startswith("api:"):
+                st.success(f"Fetched {fetched.rows:,} rows from {fetched.origin}")
+                payload, df_i = fetched, fetched.frame
+                default_name = api_url.rstrip("/").split("/")[-1] if api_url else "api"
 
-    if src_kind == "File upload":
-        upload_i = st.file_uploader("Dataset (csv / xlsx / parquet)",
-                                    type=["csv", "xlsx", "parquet"],
-                                    key="integrate_upload")
-        if upload_i is not None:
-            suffix = Path(upload_i.name).suffix.lower()
-            df_i = (pd.read_csv(upload_i) if suffix == ".csv"
-                    else pd.read_excel(upload_i) if suffix in (".xlsx", ".xls")
-                    else pd.read_parquet(upload_i))
-            payload = connectors.from_dataframe(df_i, name=upload_i.name)
-            default_name = Path(upload_i.name).stem
+        if df_i is not None:
+            html(f'<div style="border-top:1px solid #eeebe3;margin:6px 0 10px;"></div>'
+                 f'<div style="font-size:12px;font-weight:600;color:#0a6b4c;'
+                 f'margin-bottom:8px;">Fetched {len(df_i):,} rows x {df_i.shape[1]} '
+                 f'columns.</div>')
+            source_i = st.text_input("Source name (mappings are saved per source)",
+                                     value=default_name)
+            level_i = st.radio(
+                "Autonomy", [1, 0],
+                format_func=lambda v: ("Level 1 - auto-pilot: accept the LLM mapping "
+                                       "and run end to end") if v == 1
+                else "Level 0 - review mapping first: pause at a gate to edit targets",
+                key="integrate_autonomy")
+            known = Registry().latest_mapping(source_i) if source_i else None
+            if known is not None:
+                st.caption(f"Confirmed mapping v{known['version']} on file for "
+                           f"'{source_i}' - runs will reuse it without asking.")
+            if st.button("Run pipeline", type="primary", disabled=not source_i,
+                         key="run_pipeline_btn"):
+                st.session_state.pop("integ_pending", None)
+                with st.spinner("Running the staged pipeline (a new schema may take "
+                                "~1 min while the local LLM proposes the mapping)..."):
+                    m = run_pipeline(payload if payload is not None else df_i,
+                                     source_i, autonomy_level=level_i)
+                if m.status == "paused":
+                    st.session_state["integ_pending"] = {
+                        "proposal": m.data["reports"]["mapping_proposal"],
+                        "source": source_i, "run_id": m.run_id}
+                else:
+                    st.session_state["integ_done"] = m.run_id
+                load_run_bundle.clear()
+                rar_history.clear()
 
-    elif src_kind == "Database":
-        db_url = st.text_input(
-            "Connection string",
-            placeholder="postgresql://user:pass@host:5432/db   or   sqlite:///crm.db",
-            help="Credentials are used for this fetch only - never saved. "
-                 "Prefer keeping them in .env.")
-        c1, c2, c3 = st.columns([2, 2, 1])
-        db_table = c1.text_input("Table")
-        db_query = c2.text_input("...or SQL query (overrides table)")
-        db_limit = c3.number_input("Row limit (0 = all)", 0, value=0)
-        if st.button("Fetch from database",
-                     disabled=not (db_url and (db_table or db_query))):
-            try:
-                st.session_state["integ_src"] = connectors.from_database(
-                    db_url, table=(None if db_query else db_table or None),
-                    query=db_query or None, limit=db_limit or None)
-            except Exception as exc:
-                st.error(f"Fetch failed: {exc}")
-        fetched = st.session_state.get("integ_src")
-        if fetched is not None and fetched.origin.startswith("db:"):
-            st.success(f"Fetched {fetched.rows:,} rows from {fetched.origin}")
-            payload, df_i = fetched, fetched.frame
-            default_name = (db_table or "db-query").replace(" ", "-")
-
-    else:  # REST API
-        api_url = st.text_input("Endpoint URL",
-                                placeholder="https://api.example.com/v2/customers")
-        c1, c2, c3 = st.columns(3)
-        rec_path = c1.text_input("Records path", placeholder="data.items",
-                                 help="dot-path to the list of records; empty = root")
-        hdr_name = c2.text_input("Auth header name", placeholder="Authorization")
-        hdr_value = c3.text_input("Auth header value", type="password",
-                                  placeholder="Bearer ...")
-        if st.button("Fetch from API", disabled=not api_url):
-            try:
-                headers = {hdr_name: hdr_value} if hdr_name and hdr_value else None
-                st.session_state["integ_src"] = connectors.from_api(
-                    api_url, records_path=rec_path, headers=headers)
-            except Exception as exc:
-                st.error(f"Fetch failed: {exc}")
-        fetched = st.session_state.get("integ_src")
-        if fetched is not None and fetched.origin.startswith("api:"):
-            st.success(f"Fetched {fetched.rows:,} rows from {fetched.origin}")
-            payload, df_i = fetched, fetched.frame
-            default_name = api_url.rstrip("/").split("/")[-1] if api_url else "api"
-
-    if df_i is not None:
-        c1, c2 = st.columns(2)
-        source_i = c1.text_input("Source name (mappings are saved per source)",
-                                 value=default_name)
-        level_i = c2.radio("Autonomy", [1, 0], horizontal=True,
-                           format_func=lambda v: "Level 1 - auto-pilot" if v == 1
-                           else "Level 0 - review mapping first")
-        known = Registry().latest_mapping(source_i) if source_i else None
-        if known is not None:
-            st.caption(f"Confirmed mapping v{known['version']} on file for "
-                       f"'{source_i}' - runs will reuse it without asking.")
-        with st.expander("Column profile (what the tool sees)"):
-            st.dataframe(profiler.summary_frame(profiler.profile_table(df_i)),
-                         width="stretch")
-
-        if st.button("Run pipeline", type="primary", disabled=not source_i):
-            st.session_state.pop("integ_pending", None)
-            with st.spinner("Running the staged pipeline (a new schema may take "
-                            "~1 min while the local LLM proposes the mapping)..."):
-                m = run_pipeline(payload if payload is not None else df_i,
-                                 source_i, autonomy_level=level_i)
-            if m.status == "paused":
-                st.session_state["integ_pending"] = {
-                    "proposal": m.data["reports"]["mapping_proposal"],
-                    "source": source_i, "run_id": m.run_id}
-            else:
-                st.session_state["integ_done"] = m.run_id
-
+    with col_main:
         pending = st.session_state.get("integ_pending")
-        if pending and pending["source"] == source_i:
-            st.warning("Level 0 gate: review the proposed mapping, edit any target, "
-                       "then confirm. Quarantined columns stay excluded either way.")
+        done_id = st.session_state.get("integ_done")
+
+        if df_i is None and not pending and not done_id:
+            with st.container(border=True):
+                html('<div style="font-size:14px;font-weight:700;">Column profile - what '
+                     'the tool sees</div>'
+                     f'<div style="text-align:center;padding:48px 20px;color:{FAINT};'
+                     f'font-size:13px;">Choose a source on the left and fetch data to '
+                     f'begin.</div>')
+
+        if df_i is not None and not pending and not done_id:
+            with st.container(border=True):
+                html('<div style="font-size:14px;font-weight:700;">Column profile - what '
+                     'the tool sees</div>'
+                     f'<div style="font-size:12px;color:{MUTED};margin-bottom:8px;">Loaded '
+                     'automatically on fetch. Roles drive which lenses can run.</div>')
+                st.dataframe(profiler.summary_frame(profiler.profile_table(df_i)),
+                             width="stretch")
+
+        if pending:
+            html(f'<div style="display:flex;align-items:center;gap:14px;background:#fdfaf0;'
+                 f'border:1px solid #ece2c2;border-radius:13px;padding:14px 18px;'
+                 f'margin-bottom:14px;">'
+                 f'<span style="width:10px;height:10px;border-radius:50%;background:{AMBER};">'
+                 f'</span><div style="flex:1;"><div style="font-size:13.5px;font-weight:700;'
+                 f'color:#7a6410;">Paused at Level 0 gate</div>'
+                 f'<div class="cl-mono" style="font-size:11.5px;color:{MUTED};margin-top:2px;">'
+                 f'awaiting mapping confirmation - source {pending["source"]}</div></div></div>')
+            banner("warn", "Level 0 gate",
+                   "Review the LLM-proposed mapping, edit any target, then confirm. "
+                   "Quarantined columns stay excluded either way.")
             prop = pending["proposal"]
             edit_frame = pd.DataFrame(
                 [{"source": mp["source"], "target": mp["target"] or "",
@@ -449,20 +856,23 @@ with tab_integrate:
             edited = st.data_editor(
                 edit_frame, hide_index=True, width="stretch",
                 disabled=["source", "confidence"],
-                column_config={"target": st.column_config.SelectboxColumn(
-                    "target (canonical)", options=[""] + sorted(CANONICAL))})
+                column_config={
+                    "target": st.column_config.SelectboxColumn(
+                        "target (canonical)", options=[""] + sorted(CANONICAL)),
+                    "confidence": st.column_config.ProgressColumn(
+                        "confidence", min_value=0.0, max_value=1.0, format="%.2f")})
             if prop.get("quarantine"):
                 st.caption("Quarantined (never applied): " + ", ".join(
                     q["source"] for q in prop["quarantine"]))
             if st.button("Confirm mapping & run", type="primary"):
                 by_source = {mp["source"]: mp for mp in prop["mappings"]}
                 confirmed_mappings = []
-                for _, row in edited.iterrows():
-                    orig = by_source[row["source"]]
-                    target = row["target"] or None
+                for _, r in edited.iterrows():
+                    orig = by_source[r["source"]]
+                    target = r["target"] or None
                     kept = target == orig["target"]
                     confirmed_mappings.append({
-                        "source": row["source"], "target": target,
+                        "source": r["source"], "target": target,
                         "confidence": orig["confidence"] if kept else 0.99,
                         "value_map": orig["value_map"] if kept else None})
                 override = {"engine": "human-confirmed",
@@ -470,282 +880,922 @@ with tab_integrate:
                             "quarantine": prop.get("quarantine", [])}
                 with st.spinner("Running with the confirmed mapping..."):
                     m = run_pipeline(payload if payload is not None else df_i,
-                                     source_i, autonomy_level=0,
+                                     pending["source"], autonomy_level=0,
                                      proposal_override=override)
                 st.session_state.pop("integ_pending", None)
                 st.session_state["integ_done"] = m.run_id
+                load_run_bundle.clear()
+                rar_history.clear()
+                st.rerun()
 
-        done_id = st.session_state.get("integ_done")
-        if done_id:
-            try:
-                m_done = RunManifest.load(done_id)
-                status = m_done.status
-                (st.success if status == "completed" else st.error)(
-                    f"Run {done_id}: {status} - full detail in the Process tab.")
-                st.dataframe(m_done.summary_frame()[
-                    ["stage", "status", "elapsed_s", "rows_out", "notes"]],
-                    width="stretch")
-            except FileNotFoundError:
+        if done_id and not pending:
+            bundle = load_run_bundle(done_id)
+            if bundle is None:
                 st.session_state.pop("integ_done", None)
+            else:
+                data = bundle["data"]
+                stage_frame = bundle["stage_frame"]
+                n_done = int((stage_frame["status"] == "done").sum())
+                status = data.get("status", "completed")
+                ok = status == "completed"
+                head_bg, head_line, head_dot, head_c = (
+                    ("#eaf6ef", "#bfe3cf", GREEN, "#0a6b4c") if ok
+                    else ("#fbeae4", "#f0cabb", RED, "#8a2f08"))
+                title = ("Pipeline complete" if ok else f"Pipeline {status}")
+                sub = (f"{n_done}/12 stages done - models persisted, Dashboard unlocked"
+                       if ok else "see the stage notes below")
+                html(f'<div style="display:flex;align-items:center;gap:14px;background:{head_bg};'
+                     f'border:1px solid {head_line};border-radius:13px;padding:14px 18px;'
+                     f'margin-bottom:14px;">'
+                     f'<span style="width:10px;height:10px;border-radius:50%;'
+                     f'background:{head_dot};"></span>'
+                     f'<div style="flex:1;"><div style="font-size:13.5px;font-weight:700;'
+                     f'color:{head_c};">{title}</div>'
+                     f'<div class="cl-mono" style="font-size:11.5px;color:{MUTED};'
+                     f'margin-top:2px;">run {done_id}</div></div>'
+                     f'<span class="cl-mono" style="font-size:12px;color:{MUTED};">'
+                     f'{n_done} / 12 stages</span></div>')
+
+                if ok:
+                    mapping_rep = data.get("reports", {}).get("mapping", {}) or {}
+                    training_rep = data.get("reports", {}).get("training", {}) or {}
+                    renamed = mapping_rep.get("renamed", {})
+                    dropped = (training_rep.get("leakage", {}) or {}).get("dropped", {})
+                    campaign_c = {s: t for s, t in renamed.items()
+                                  if t in ("treatment_group", "conversion")}
+                    trans_c = {s: t for s, t in renamed.items()
+                               if t in ("InvoiceDate", "Amount", "Quantity", "Price",
+                                        "CustomerID", "Invoice")}
+                    label_c = {s: t for s, t in renamed.items() if t == "Churn"}
+                    ident_c = {s: t for s, t in renamed.items() if t == "customerID"}
+                    core_c = {s: t for s, t in renamed.items()
+                              if s not in campaign_c and s not in trans_c
+                              and s not in label_c and s not in ident_c}
+                    quarantined = (mapping_rep.get("quarantined", [])
+                                   + mapping_rep.get("unmapped", []))
+                    buckets = [
+                        ("Lens A / B / D - core features",
+                         ", ".join(f"{s} -> {t}" for s, t in core_c.items()) or None,
+                         "#bfe3cf", "#eaf6ef", "#0a6b4c"),
+                        ("Lens C - campaign log",
+                         ", ".join(f"{s} -> {t}" for s, t in campaign_c.items()) or None,
+                         "#bfe3cf", "#eaf6ef", "#0a6b4c"),
+                        ("Lens E - transaction log",
+                         ", ".join(f"{s} -> {t}" for s, t in trans_c.items()) or None,
+                         "#bfe3cf", "#eaf6ef", "#0a6b4c"),
+                        ("Label", ", ".join(f"{s} -> {t}" for s, t in label_c.items()) or None,
+                         "#cfe2f0", "#eef5fb", "#0b5573"),
+                        ("Identity",
+                         (", ".join(f"{s} -> {t}" for s, t in ident_c.items())
+                          + (" (excluded from training)" if any(
+                              "customerID" in k for k in dropped) else "")) if ident_c else None,
+                         CARD_LINE, "#fbfaf7", MUTED),
+                        ("Quarantined / unmapped",
+                         ", ".join(str(q) for q in quarantined) + " - kept out of every lens"
+                         if quarantined else None,
+                         "#ece2c2", "#faf6e8", "#9a8f6e"),
+                    ]
+                    cells = "".join(
+                        f'<div style="border:1px solid {line};background:{bg};'
+                        f'border-radius:10px;padding:11px 13px;">'
+                        f'<div class="cl-mono" style="font-size:10.5px;font-weight:700;'
+                        f'letter-spacing:.06em;text-transform:uppercase;color:{head};'
+                        f'margin-bottom:6px;">{title_}</div>'
+                        f'<div class="cl-mono" style="font-size:11.5px;color:#3a3e45;'
+                        f'line-height:1.7;">{cols}</div></div>'
+                        for title_, cols, line, bg, head in buckets if cols)
+                    with st.container(border=True):
+                        html('<div style="font-size:13.5px;font-weight:700;">How the '
+                             'pipeline segregated the columns</div>'
+                             f'<div style="font-size:12px;color:{MUTED};margin-bottom:12px;">'
+                             'Every column was categorized - nothing dropped silently.</div>'
+                             f'<div style="display:grid;grid-template-columns:repeat(3,1fr);'
+                             f'gap:10px;">{cells}</div>')
+
+                html('<div style="font-size:13.5px;font-weight:700;margin:14px 0 8px;">'
+                     'Stage ledger</div>')
+                status_table(stage_frame[["stage", "status", "elapsed_s",
+                                          "rows_out", "notes"]].fillna("-"))
+                if ok:
+                    banner("ok", "Dashboard unlocked",
+                           "All lenses trained and scored for this source. Open the "
+                           "04 Dashboard tab for the full story, or the 03 Process tab "
+                           "for backend detail.")
+
+# ---------------------------------------------------------------------------
+# 03 PROCESS
+# ---------------------------------------------------------------------------
 
 with tab_process:
-    reg = Registry()
-    runs_frame = reg.all_runs()
-    if runs_frame.empty:
-        st.info("No runs yet - bring a dataset through the Integrate tab.")
+    if runs_all.empty:
+        st.info("No runs yet - bring a dataset through Add your data.")
     else:
-        st.dataframe(runs_frame[["run_id", "source_name", "status", "rows",
-                                 "created_at", "finished_at"]],
-                     width="stretch")
-        run_pick = st.selectbox("Inspect run", runs_frame["run_id"])
-        try:
-            m_sel = RunManifest.load(run_pick)
-        except FileNotFoundError:
+        html('<div style="font-size:15px;font-weight:700;margin-bottom:2px;">Runs registry'
+             f'</div><div style="font-size:12px;color:{MUTED};margin-bottom:10px;">Every '
+             'dataset that came through Add your data - completed, paused at a gate, or '
+             'failed, all shown plainly.</div>')
+        status_table(runs_all[["run_id", "source_name", "status", "rows",
+                               "created_at", "finished_at"]].head(12))
+        run_pick = st.selectbox("Inspect run", runs_all["run_id"])
+        bundle = load_run_bundle(run_pick)
+        if bundle is None:
             st.error("Manifest file missing for this run (runs/ was cleaned?).")
-            m_sel = None
-        if m_sel is not None:
-            st.markdown(f"**Status:** {m_sel.status} - source `{m_sel.data['source']}` "
-                        f"- autonomy level {m_sel.data['autonomy_level']}")
-            narrative = m_sel.data.get("reports", {}).get("narrative")
+        else:
+            data = bundle["data"]
+            html(f'<div style="display:flex;align-items:center;gap:10px;margin:8px 0 12px;'
+                 f'flex-wrap:wrap;"><span class="cl-kicker">Inspecting</span>'
+                 f'<span class="cl-mono" style="font-size:13px;font-weight:600;">{run_pick}'
+                 f'</span><span style="font-size:12.5px;color:{MUTED};">- source '
+                 f'{data["source"]} - autonomy level {data["autonomy_level"]} - status '
+                 f'{data["status"]}</span></div>')
+            narrative = data.get("reports", {}).get("narrative")
             if narrative:
-                st.info(narrative["summary"])
-                st.caption(f"summary by {narrative['engine']} - every figure "
-                           "audited against computed facts")
-            drift_rep = m_sel.data.get("reports", {}).get("drift")
+                banner("info", "Narrative", narrative["summary"],
+                       credit=f"summary by {narrative['engine']} - every figure audited "
+                              "against computed facts")
+            drift_rep = data.get("reports", {}).get("drift")
             if drift_rep and drift_rep.get("alerts"):
-                st.warning(f"Drift alert: {drift_rep['recommendation']}")
-            analytics_rep = m_sel.data.get("reports", {}).get("analytics")
-            if analytics_rep:
-                st.markdown("**Population insights**")
-                c1, c2 = st.columns(2)
-                if analytics_rep.get("global_drivers"):
-                    c1.caption("Global churn drivers (mean effect, percentage points)")
-                    c1.dataframe(pd.DataFrame(analytics_rep["global_drivers"]),
-                                 width="stretch", hide_index=True)
-                if analytics_rep.get("segments"):
-                    c2.caption("Segments (lens D)")
-                    seg_frame = pd.DataFrame(analytics_rep["segments"])
-                    c2.dataframe(seg_frame.drop(columns=["numeric_means"],
-                                                errors="ignore"),
-                                 width="stretch", hide_index=True)
-                if analytics_rep.get("lift_by_decile"):
-                    with st.expander("Lift by decile (labeled data)"):
-                        st.dataframe(pd.DataFrame(analytics_rep["lift_by_decile"]),
-                                     width="stretch", hide_index=True)
-            st.dataframe(m_sel.summary_frame(), width="stretch")
-            with st.expander("Cleaning report (the decision ledger)", expanded=True):
-                for line in m_sel.ledger_lines():
-                    st.text(line)
-            for name, payload in m_sel.data.get("reports", {}).items():
+                banner("warn", "Drift alert", str(drift_rep.get("recommendation", "")))
+            html('<div style="font-size:13.5px;font-weight:700;margin:4px 0 8px;">'
+                 'Stage ledger - loading, mapping, preprocessing, analysis</div>')
+            status_table(bundle["stage_frame"][["stage", "status", "elapsed_s",
+                                                "rows_out", "notes"]].fillna("-"))
+            dark_ledger(bundle["ledger"])
+            for name, payload_rep in data.get("reports", {}).items():
                 with st.expander(f"Report: {name}"):
-                    st.json(payload)
-            eda_files = [p for p in m_sel.data["stages"]["eda_report"]["artifacts"]
+                    st.json(payload_rep)
+            eda_files = [p for p in data["stages"]["eda_report"]["artifacts"]
                          if Path(p).exists()]
             if eda_files:
-                st.markdown("**Data review charts**")
+                html('<div style="font-size:13.5px;font-weight:700;margin:4px 0 2px;">'
+                     'Data review charts</div>'
+                     f'<div style="font-size:12px;color:{MUTED};margin-bottom:8px;">'
+                     'Generated automatically at the eda_report stage, before any '
+                     'training: label balance, churn rate per category, and numeric '
+                     'distributions - a quick visual sanity check of what came in.</div>')
                 for chunk_start in range(0, len(eda_files), 2):
                     cols = st.columns(2)
                     for col, path in zip(cols, eda_files[chunk_start:chunk_start + 2]):
                         col.image(path)
-            out_file = next((m_sel.run_dir / n for n in ("scored.parquet", "mapped.parquet")
-                             if (m_sel.run_dir / n).exists()), None)
+            run_dir = Path(bundle["run_dir"])
+            out_file = next((run_dir / n for n in ("scored.parquet", "mapped.parquet")
+                             if (run_dir / n).exists()), None)
             if out_file is not None:
                 st.download_button(
                     f"Download {out_file.stem} output (CSV)",
                     pd.read_parquet(out_file).to_csv(index=False).encode(),
                     f"{run_pick}_{out_file.stem}.csv", "text/csv")
 
-with tab_journeys:
-    st.markdown("**Churn as stopping showing up.** Upload a raw event log (one row "
-                "per user activity) - retention is computed at your chosen time "
-                "grain with an inactivity window, sliced by any population filter, "
-                "with per-user churn-timing estimates. Still-active users are "
-                "censored, never miscounted as churned.")
-    upload_j = st.file_uploader("Event log (csv / parquet)",
-                                type=["csv", "parquet"], key="journeys_upload")
-    if upload_j is not None:
-        from phase_2.analytics import journeys as jn
+# ---------------------------------------------------------------------------
+# 04 DASHBOARD
+# ---------------------------------------------------------------------------
 
-        events_j = (pd.read_csv(upload_j)
-                    if upload_j.name.endswith(".csv") else pd.read_parquet(upload_j))
-        cols = list(events_j.columns)
-        guess_user = next((c for c in cols if "user" in c.lower()
-                           or "id" in c.lower()), cols[0])
-        guess_ts = next((c for c in cols if pd.to_datetime(
-            events_j[c].head(20), errors="coerce").notna().mean() > 0.8), cols[-1])
-        c1, c2, c3, c4 = st.columns(4)
-        user_col_j = c1.selectbox("User column", cols, index=cols.index(guess_user))
-        ts_col_j = c2.selectbox("Timestamp column", cols, index=cols.index(guess_ts))
-        gran_j = c3.radio("Time grain", ["W", "M"], horizontal=True,
-                          format_func=lambda g: "Weekly" if g == "W" else "Monthly")
-        window_j = c4.number_input("Inactivity window (periods)", 1, 12, 2)
-        seg_options = ["(none)"] + [c for c in cols
-                                    if c not in (user_col_j, ts_col_j)
-                                    and events_j[c].nunique() <= 12]
-        seg_j = st.selectbox("Slice by population filter", seg_options)
-        seg_col = None if seg_j == "(none)" else seg_j
-
-        with st.spinner("Building journeys..."):
-            attrs = (events_j[[user_col_j, seg_col]].drop_duplicates(user_col_j)
-                     if seg_col else None)
-            jframe = jn.build_journeys(events_j, user_col_j, ts_col_j,
-                                       granularity=gran_j,
-                                       inactivity_window=int(window_j),
-                                       attributes=attrs)
-            outlook = jn.individual_outlook(jframe, segment_col=seg_col)
-
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Users", f"{len(jframe):,}")
-        m2.metric("Churned", f"{jframe['churned'].mean():.1%}")
-        m3.metric("At risk (gap started)",
-                  f"{(jframe['journey_status'] == 'at_risk').mean():.1%}")
-        timing = jn.churn_timing(jframe)
-        if len(timing):
-            m4.metric("Most common churn period",
-                      f"period {int(timing.idxmax())}")
-
-        c1, c2 = st.columns(2)
-        # retention curves: overall + segments (capped to the 4 largest)
-        fig, ax = plt.subplots(figsize=(7, 4))
-        overall = jn.retention_curve(jframe)
-        ax.plot(overall.index, overall.values, color="#1a1a1a", linewidth=2.2,
-                label="all users")
-        if seg_col:
-            curves = jn.retention_by_segment(jframe, seg_col)
-            top_segs = (jframe[seg_col].value_counts().head(4).index.astype(str))
-            for seg, color in zip(top_segs, PALETTE):
-                if seg in curves:
-                    ax.plot(curves[seg].index, curves[seg].values,
-                            color=color, linewidth=2, label=seg)
-        ax.set_xlabel(f"Journey period ({'weeks' if gran_j == 'W' else 'months'})")
-        ax.set_ylabel("Still engaged")
-        ax.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
-        ax.set_title("Retention by journey period", loc="left",
-                     fontweight="bold", fontsize=10)
-        ax.legend(frameon=False, fontsize=9)
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        fig.tight_layout()
-        c1.pyplot(fig)
-
-        if len(timing):
-            fig2, ax2 = plt.subplots(figsize=(7, 4))
-            ax2.bar(timing.index, timing.values, color=PALETTE[0])
-            ax2.set_xlabel(f"Journey period of churn "
-                           f"({'week' if gran_j == 'W' else 'month'} they went silent)")
-            ax2.set_ylabel("Users")
-            ax2.set_title("When in the journey users churn", loc="left",
-                          fontweight="bold", fontsize=10)
-            for side in ("top", "right"):
-                ax2.spines[side].set_visible(False)
-            fig2.tight_layout()
-            c2.pyplot(fig2)
-
-        if seg_col:
-            st.markdown(f"**Segment comparison - by `{seg_col}`**")
-            st.dataframe(jn.segment_summary(jframe, seg_col),
-                         width="stretch", hide_index=True)
-
-        st.markdown("**Individual outlook**")
-        pick = st.selectbox("Inspect a user", outlook["user"].astype(str))
-        row = outlook[outlook["user"].astype(str) == pick].iloc[0]
-        i1, i2, i3, i4 = st.columns(4)
-        i1.metric("Status", row["journey_status"])
-        i2.metric("Journey age", f"{int(row['periods_survived'])} periods")
-        exp_rem = row["expected_remaining_periods"]
-        i3.metric("Expected remaining",
-                  "beyond data horizon" if pd.isna(exp_rem) else f"~{exp_rem} periods")
-        est = row["estimated_churn_period"]
-        i4.metric("Estimated churn period",
-                  "unknown" if pd.isna(est) else f"period {est:.0f}")
-        st.download_button("Download per-user outlook (CSV)",
-                           outlook.to_csv(index=False).encode(),
-                           "journey_outlook.csv", "text/csv")
-
-with tab_target:
-    st.markdown(
-        "Uplift needs **campaign data**: a `treatment_group` column (who got the "
-        "offer) and a `conversion` outcome. Classification finds *likely churners*; "
-        "uplift finds *persuadable* ones - the customers where the offer changes "
-        "the outcome, which is what the budget should chase.")
-    if not pipeline.artifact_exists("uplift_model"):
-        st.warning("Uplift artifact not trained yet - run notebook 03.")
+with tab_dash:
+    if not has_completed:
+        chain = "".join(
+            f'<span style="font-size:12px;font-weight:600;color:{FAINT};background:#f3f1ea;'
+            f'border:1px solid {CARD_LINE};padding:6px 13px;border-radius:20px;">{lbl}</span>'
+            + ('<span style="color:#c9c5ba;font-size:12px;margin:0 6px;">-&gt;</span>'
+               if i < 4 else "")
+            for i, lbl in enumerate(["A - Who leaves", "B - When", "C - Who can be saved",
+                                     "D - Segments", "E - What it costs"]))
+        html(f'<div style="background:#fff;border:1px solid {CARD_LINE};border-radius:16px;'
+             f'padding:56px 24px;text-align:center;">'
+             f'<div style="font-family:\'Space Grotesk\',sans-serif;font-size:19px;'
+             f'font-weight:600;margin-bottom:8px;">The Dashboard activates once '
+             f'integration is done</div>'
+             f'<div style="font-size:13px;color:{MUTED};max-width:520px;margin:0 auto 22px;'
+             f'line-height:1.6;">Bring a dataset through <b>Add your data</b>. The '
+             f'pipeline loads, maps and trains - then this tab tells the full story '
+             f'across all five lenses.</div>'
+             f'<div style="display:flex;justify-content:center;align-items:center;'
+             f'flex-wrap:wrap;gap:2px;">{chain}</div></div>')
     else:
-        upload_t = st.file_uploader(
-            "Campaign file (treatment_group + conversion + campaign features)",
-            type=["csv", "parquet"], key="target_upload")
-        if upload_t is not None:
-            df_t = (pd.read_csv(upload_t) if upload_t.name.endswith(".csv")
-                    else pd.read_parquet(upload_t))
-            rep_t = pipeline.validate(df_t)
-            if not rep_t["lenses"]["C"]["ok"]:
-                st.error(f"Lens C: {rep_t['lenses']['C']['message']}")
-            else:
-                scored_t, run_rep = pipeline.score(df_t)
-                if "uplift_score" not in scored_t.columns:
-                    st.error("Uplift scoring failed: "
-                             + str(run_rep.get("errors", {}).get("C",
-                                   "features do not match the trained model")))
+        # one entry per SOURCE - its latest completed run; run history lives in
+        # the Process tab, never repeated here
+        latest_per_source = completed.drop_duplicates("source_name")
+        pick_labels = {str(r["source_name"]): r["run_id"]
+                       for _, r in latest_per_source.iterrows()}
+        if len(pick_labels) > 1:
+            pick = st.selectbox("Dataset", list(pick_labels.keys()))
+        else:
+            pick = next(iter(pick_labels))
+        bundle = load_run_bundle(pick_labels[pick])
+        scored = bundle["scored"] if bundle else None
+        if scored is None:
+            st.warning("This run has no scored output on disk - pick another run.")
+        else:
+            data = bundle["data"]
+            reports = data.get("reports", {})
+            analytics = reports.get("analytics", {}) or {}
+            training = reports.get("training", {}) or {}
+            narrative = reports.get("narrative", {}) or {}
+            source = data["source"]
+            created = str(data.get("created_at", ""))[:10]
+            n_cust = len(scored)
+
+            has_rar = "revenue_at_risk" in scored.columns
+            total_rar = float(scored["revenue_at_risk"].sum()) if has_rar else None
+            history = rar_history(source) if has_rar else pd.Series(dtype=float)
+            delta_chip = ""
+            if len(history) >= 2 and history.values[-2] > 0:
+                delta = history.values[-1] / history.values[-2] - 1
+                arrow = "+" if delta >= 0 else ""
+                delta_chip = (f'<span class="cl-mono" style="font-size:12px;font-weight:700;'
+                              f'color:#f0b35f;background:rgba(240,179,95,.12);border:1px solid '
+                              f'rgba(240,179,95,.3);padding:4px 11px;border-radius:16px;">'
+                              f'{arrow}{delta:.1%} vs previous run</span>')
+            spark_html = ""
+            if len(history) >= 2:
+                spark_html = (f'<div style="min-width:230px;"><div class="cl-kicker" '
+                              f'style="color:#9aa0aa;margin-bottom:6px;">Revenue at risk - '
+                              f'trend</div><img src="data:image/png;base64,'
+                              f'{spark_b64(history)}" style="width:230px;"/></div>')
+            narr_html = ""
+            if narrative.get("summary"):
+                narr_html = (f'<p style="margin:14px 0 0;font-size:13px;color:#c3c7cf;'
+                             f'line-height:1.6;max-width:660px;">{narrative["summary"]}</p>')
+            headline = money(total_rar) if total_rar is not None else f"{n_cust:,}"
+            headline_sub = "revenue at risk" if total_rar is not None else "customers scored"
+            html(f'<div style="background:#1c1f26;color:#fff;border-radius:18px;'
+                 f'padding:24px 28px;margin:10px 0 14px;">'
+                 f'<div style="display:flex;justify-content:space-between;gap:28px;'
+                 f'flex-wrap:wrap;align-items:flex-start;">'
+                 f'<div style="flex:1;min-width:340px;">'
+                 f'<div class="cl-kicker" style="color:#9aa0aa;">Executive summary - '
+                 f'{source} - {n_cust:,} customers - run {created}</div>'
+                 f'<div style="display:flex;align-items:baseline;gap:14px;margin-top:12px;'
+                 f'flex-wrap:wrap;">'
+                 f'<span style="font-family:\'Space Grotesk\',sans-serif;font-size:46px;'
+                 f'font-weight:700;letter-spacing:-.02em;line-height:1;color:#fff;">'
+                 f'{headline}</span>'
+                 f'<span style="font-size:14px;color:#c3c7cf;">{headline_sub}</span>'
+                 f'{delta_chip}</div>{narr_html}</div>{spark_html}</div></div>')
+
+            # ---- lens cards + navigation
+            bands = scored["risk_band"].value_counts() if "risk_band" in scored.columns else pd.Series(dtype=int)
+            hi_crit = int(bands.get("High", 0) + bands.get("Critical", 0))
+            jframe_all = snapshot_journeys(scored, None)
+            timing_all = jn.churn_timing(jframe_all) if jframe_all is not None and jframe_all["churned"].any() else pd.Series(dtype=int)
+            exit_peak = f"mo {int(timing_all.idxmax())}" if len(timing_all) else "-"
+            campaign = st.session_state.get("campaign_scored")
+            seg_profiles = analytics.get("segments", [])
+            worst_seg = max(seg_profiles, key=lambda s: s["mean_churn_probability"]) if seg_profiles else None
+
+            card_defs = [
+                ("A", "Who leaves", f"{hi_crit:,}" if len(bands) else "--",
+                 "high / critical customers", "churn_probability" in scored.columns),
+                ("B", "When", exit_peak if len(timing_all) else "--",
+                 "exit peak in the journey", "tenure" in scored.columns),
+                ("C", "Who can be saved",
+                 f"{campaign['persuadable']:,}" if campaign else "--",
+                 "persuadable customers" if campaign else "add campaign data to unlock",
+                 bool(campaign)),
+                ("D", "Segments", str(len(seg_profiles)) if seg_profiles else "--",
+                 (f"worst: cluster {worst_seg['segment']} - "
+                  f"{worst_seg['mean_churn_probability']:.0%} churn") if worst_seg
+                 else "no segment model", bool(seg_profiles)),
+                ("E", "What it costs", money(total_rar) if total_rar is not None else "--",
+                 (delta_chip and "trend vs previous run") or "prob x CLV summed",
+                 has_rar),
+            ]
+            lens_pick = st.segmented_control(
+                "View lens", [f"{k} - {t}" for k, t, *_ in card_defs] + ["What-if"],
+                default="A - Who leaves", key="lens_view")
+            sel_key = (lens_pick or "A").split(" ")[0]
+            cells = []
+            for k, title_, kpi, sub, on in card_defs:
+                selected = k == sel_key
+                line = INK if selected else CARD_LINE
+                shadow = "0 10px 24px -12px rgba(20,24,29,.4)" if selected else "none"
+                foot = "Viewing" if selected else "View details"
+                foot_c = GREEN if selected else FAINT
+                dim = "opacity:.6;" if not on else ""
+                cells.append(
+                    f'<div style="background:#fff;border:1px solid {line};border-top:3px '
+                    f'solid {LENS_COLOR[k]};border-radius:13px;padding:14px 15px;'
+                    f'box-shadow:{shadow};{dim}">'
+                    f'<div class="cl-mono" style="font-size:11px;font-weight:600;'
+                    f'color:{LENS_COLOR[k]};">{k} - {title_}</div>'
+                    f'<div style="font-family:\'Space Grotesk\',sans-serif;font-size:26px;'
+                    f'font-weight:600;letter-spacing:-.02em;margin:8px 0 3px;">{kpi}</div>'
+                    f'<div style="font-size:11.5px;color:{MUTED};line-height:1.4;">{sub}</div>'
+                    f'<div class="cl-mono" style="font-size:11px;font-weight:600;'
+                    f'color:{foot_c};margin-top:9px;">{foot}</div></div>')
+            html('<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;'
+                 'margin:4px 0 16px;">' + "".join(cells) + "</div>")
+
+            powered_feats = ", ".join((training.get("leakage", {}) or {}).get("kept", [])[:8])
+
+            # ---------------- LENS A ----------------
+            if sel_key == "A" and "churn_probability" in scored.columns:
+                with st.container(border=True):
+                    auc = (training.get("lenses", {}).get("A", {}) or {}).get("test_roc_auc")
+                    section_head("A", "Who leaves",
+                                 f"binary churn classifier - test AUC {auc}" if auc
+                                 else "binary churn classifier")
+                    crit = int(bands.get("Critical", 0))
+                    crit_rar = (float(scored.loc[scored["risk_band"] == "Critical",
+                                                 "revenue_at_risk"].sum())
+                                if has_rar and crit else 0.0)
+                    if crit:
+                        body = (f"Contact the {crit:,} Critical-band customers first, "
+                                f"ordered by revenue at risk.")
+                        if crit_rar:
+                            body += (f" At an assumed 18% save rate this protects about "
+                                     f"{money(crit_rar * 0.18)}.")
+                        rec_action(body)
+                    mean_p = float(scored["churn_probability"].mean())
+                    tiles = [tile("High + Critical", f"{hi_crit:,}", accent=RED),
+                             tile("Mean churn probability", f"{mean_p:.0%}", accent=BLUE)]
+                    if auc:
+                        tiles.append(tile("Model quality - AUC", f"{auc}", accent=GREEN))
+                    tile_row(tiles)
+
+                    c1, c2 = st.columns([1.3, 1])
+                    with c1:
+                        html('<div style="font-size:13px;font-weight:700;margin-bottom:6px;">'
+                             'Customers per risk band - pick a band to see its customers</div>')
+                        order = [b for b in ("Low", "Medium", "High", "Critical")
+                                 if b in bands.index]
+                        band_sel = st.segmented_control(
+                            "Risk band", order,
+                            default="Critical" if "Critical" in order else order[-1],
+                            key="band_sel") or order[-1]
+                        band_counts = bands.reindex(order).dropna().astype(int)
+                        st.pyplot(counts_barh(
+                            band_counts,
+                            color=[BAND_COLOR[b] for b in band_counts.index]))
+                    with c2:
+                        html('<div style="font-size:13px;font-weight:700;margin-bottom:8px;">'
+                             'Share of base by band</div>')
+                        st.pyplot(band_donut(bands.to_dict()))
+
+                    in_band = scored[scored["risk_band"] == band_sel]
+                    show_cols = [c for c in ("customerID", "churn_probability", "tenure",
+                                             "clv_simple", "revenue_at_risk")
+                                 if c in scored.columns]
+                    html(f'<div style="font-size:12.5px;font-weight:700;margin:6px 0 6px;">'
+                         f'Customers in the {band_sel} band ({len(in_band):,})</div>')
+                    table = (in_band.sort_values("revenue_at_risk", ascending=False)
+                             if has_rar else in_band)
+                    st.dataframe(table[show_cols].head(50), width="stretch", hide_index=True)
+                    top_driver = (analytics.get("global_drivers") or [{}])[0]
+                    if top_driver.get("feature"):
+                        html(f'<p style="margin:8px 0 14px;font-size:12.5px;color:{MUTED};'
+                             f'line-height:1.6;">Risk is not uniform: {hi_crit:,} of '
+                             f'{n_cust:,} customers need attention, and the strongest '
+                             f'global driver is <b>{top_driver["feature"]}</b> '
+                             f'({top_driver["mean_abs_effect_pp"]}pp mean effect).</p>')
+                    lineage(powered_feats,
+                            "Add support-ticket or product-usage columns to sharpen "
+                            "individual predictions.")
+
+            # ---------------- LENS B ----------------
+            elif sel_key == "B":
+                with st.container(border=True):
+                    section_head("B", "When they leave - the journey view",
+                                 "censoring-aware survival analysis")
+                    jopts = slice_options(scored)
+                    if len(timing_all):
+                        rec_action(f"The exit peak falls around period "
+                                   f"{int(timing_all.idxmax())} of the journey. "
+                                   "Front-load onboarding and schedule a proactive "
+                                   "check-in before the peak.")
+                    tiles = []
+                    if "expected_remaining_tenure" in scored.columns:
+                        med = float(scored["expected_remaining_tenure"].median())
+                        tiles.append(tile("Median remaining tenure", f"{med:.0f} mo",
+                                          accent=BLUE))
+                    if len(timing_all):
+                        tiles.append(tile("Exit peak", f"period {int(timing_all.idxmax())}",
+                                          accent=RED))
+                    if jframe_all is not None:
+                        censored = int((~jframe_all["churned"]).sum())
+                        tiles.append(tile("Still active (censored)", f"{censored:,}",
+                                          "never miscounted as churned", accent=GREEN))
+                    if tiles:
+                        tile_row(tiles)
+
+                    if jframe_all is not None and jframe_all["churned"].any():
+                        slice_sel = st.segmented_control(
+                            "Slice by", ["(none)"] + jopts, default="(none)",
+                            key="b_slice") or "(none)"
+                        seg_col = None if slice_sel == "(none)" else slice_sel
+                        jframe = snapshot_journeys(scored, seg_col)
+                        curves = {"all customers": jn.retention_curve(jframe)}
+                        if seg_col:
+                            by_seg = jn.retention_by_segment(jframe, seg_col)
+                            top_vals = jframe[seg_col].value_counts().head(4).index
+                            for v in top_vals:
+                                if str(v) in by_seg:
+                                    curves[str(v)] = by_seg[str(v)]
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            html('<div style="font-size:13px;font-weight:700;'
+                                 'margin-bottom:6px;">Retention by journey period</div>')
+                            st.pyplot(km_chart(curves, "months of tenure"))
+                        with c2:
+                            html('<div style="font-size:13px;font-weight:700;'
+                                 'margin-bottom:6px;">When in the journey customers churn</div>')
+                            st.pyplot(timing_chart(jn.churn_timing(jframe), "month"))
+                        if seg_col:
+                            html(f'<div style="font-size:12.5px;font-weight:700;'
+                                 f'margin:4px 0 6px;">Segment comparison - by {seg_col}</div>')
+                            st.dataframe(jn.segment_summary(jframe, seg_col),
+                                         width="stretch", hide_index=True)
+
+                        html('<div style="font-size:12.5px;font-weight:700;margin:8px 0 4px;">'
+                             'Individual journey outlook</div>')
+                        outlook = jn.individual_outlook(jframe, segment_col=seg_col)
+                        pick_u = st.selectbox("Inspect a user",
+                                              outlook["user"].astype(str), key="b_user")
+                        r = outlook[outlook["user"].astype(str) == pick_u].iloc[0]
+                        status_color = {jn.CHURNED: RED, jn.AT_RISK: AMBER,
+                                        jn.ACTIVE: GREEN}[r["journey_status"]]
+                        exp_rem = r["expected_remaining_periods"]
+                        est = r["estimated_churn_period"]
+                        tile_row([
+                            tile("Status", str(r["journey_status"]), accent=status_color,
+                                 value_color=status_color),
+                            tile("Journey age", f"{int(r['periods_survived'])} periods",
+                                 accent=BLUE),
+                            tile("Expected remaining",
+                                 "beyond data horizon" if pd.isna(exp_rem)
+                                 else f"~{exp_rem} periods", accent=GREEN),
+                            tile("Estimated churn period",
+                                 "unknown" if pd.isna(est) else f"period {est:.0f}",
+                                 accent=INK)])
+                        st.download_button("Download per-user outlook (CSV)",
+                                           outlook.to_csv(index=False).encode(),
+                                           "journey_outlook.csv", "text/csv")
+                    elif "expected_remaining_tenure" in scored.columns:
+                        st.caption("No churn label in this data - showing model-predicted "
+                                   "remaining tenure instead of observed retention.")
+                        fig, ax = _fig(7, 3)
+                        ax.hist(scored["expected_remaining_tenure"].dropna(), bins=30,
+                                color=BLUE, alpha=0.88)
+                        ax.set_xlabel("Expected remaining tenure (months)")
+                        ax.set_ylabel("Customers")
+                        _style_ax(ax)
+                        fig.tight_layout()
+                        st.pyplot(fig)
+
+                    with st.expander("Engagement-grain journeys - bring a raw event log"):
+                        st.markdown("**Churn as stopping showing up.** One row per user "
+                                    "activity; retention at a chosen grain with an "
+                                    "inactivity window, sliced by any population filter.")
+                        upload_j = st.file_uploader("Event log (csv / parquet)",
+                                                    type=["csv", "parquet"],
+                                                    key="journeys_upload")
+                        if upload_j is not None:
+                            events_j = (pd.read_csv(upload_j)
+                                        if upload_j.name.endswith(".csv")
+                                        else pd.read_parquet(upload_j))
+                            cols = list(events_j.columns)
+                            guess_user = next((c for c in cols if "user" in c.lower()
+                                               or "id" in c.lower()), cols[0])
+                            guess_ts = next((c for c in cols if pd.to_datetime(
+                                events_j[c].head(20), errors="coerce").notna().mean() > 0.8),
+                                cols[-1])
+                            c1, c2, c3, c4 = st.columns(4)
+                            user_col_j = c1.selectbox("User column", cols,
+                                                      index=cols.index(guess_user))
+                            ts_col_j = c2.selectbox("Timestamp column", cols,
+                                                    index=cols.index(guess_ts))
+                            gran_j = c3.radio("Time grain", ["W", "M"], horizontal=True,
+                                              format_func=lambda g: "Weekly" if g == "W"
+                                              else "Monthly")
+                            window_j = c4.number_input("Inactivity window (periods)",
+                                                       1, 12, 2)
+                            seg_opts = ["(none)"] + [
+                                c for c in cols if c not in (user_col_j, ts_col_j)
+                                and events_j[c].nunique() <= 12]
+                            seg_j = st.selectbox("Slice by population filter", seg_opts)
+                            seg_col_j = None if seg_j == "(none)" else seg_j
+                            with st.spinner("Building journeys..."):
+                                attrs = (events_j[[user_col_j, seg_col_j]]
+                                         .drop_duplicates(user_col_j) if seg_col_j else None)
+                                ev_frame = jn.build_journeys(
+                                    events_j, user_col_j, ts_col_j, granularity=gran_j,
+                                    inactivity_window=int(window_j), attributes=attrs)
+                                ev_outlook = jn.individual_outlook(ev_frame,
+                                                                   segment_col=seg_col_j)
+                            grain_lbl = "weeks" if gran_j == "W" else "months"
+                            ev_timing = jn.churn_timing(ev_frame)
+                            tile_row([
+                                tile("Users", f"{len(ev_frame):,}", accent=BLUE),
+                                tile("Churned", f"{ev_frame['churned'].mean():.1%}",
+                                     accent=RED),
+                                tile("At risk (gap started)",
+                                     f"{(ev_frame['journey_status'] == 'at_risk').mean():.1%}",
+                                     accent=AMBER),
+                                tile("Most common churn period",
+                                     f"period {int(ev_timing.idxmax())}" if len(ev_timing)
+                                     else "-", accent=INK)])
+                            curves_e = {"all users": jn.retention_curve(ev_frame)}
+                            if seg_col_j:
+                                by_seg = jn.retention_by_segment(ev_frame, seg_col_j)
+                                for v in (ev_frame[seg_col_j].value_counts()
+                                          .head(4).index.astype(str)):
+                                    if v in by_seg:
+                                        curves_e[v] = by_seg[v]
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                st.pyplot(km_chart(curves_e, grain_lbl))
+                            with c2:
+                                if len(ev_timing):
+                                    st.pyplot(timing_chart(
+                                        ev_timing, "week" if gran_j == "W" else "month"))
+                            if seg_col_j:
+                                st.dataframe(jn.segment_summary(ev_frame, seg_col_j),
+                                             width="stretch", hide_index=True)
+                            pick_e = st.selectbox("Inspect a user",
+                                                  ev_outlook["user"].astype(str),
+                                                  key="ev_user")
+                            re_ = ev_outlook[ev_outlook["user"].astype(str) == pick_e].iloc[0]
+                            exp_rem = re_["expected_remaining_periods"]
+                            est = re_["estimated_churn_period"]
+                            tile_row([
+                                tile("Status", str(re_["journey_status"]), accent=BLUE),
+                                tile("Journey age",
+                                     f"{int(re_['periods_survived'])} periods", accent=BLUE),
+                                tile("Expected remaining",
+                                     "beyond data horizon" if pd.isna(exp_rem)
+                                     else f"~{exp_rem} periods", accent=GREEN),
+                                tile("Estimated churn period",
+                                     "unknown" if pd.isna(est) else f"period {est:.0f}",
+                                     accent=INK)])
+                            st.download_button("Download per-user outlook (CSV)",
+                                               ev_outlook.to_csv(index=False).encode(),
+                                               "journey_outlook.csv", "text/csv",
+                                               key="ev_dl")
+                    if jframe_all is not None and len(timing_all):
+                        censored_n = int((~jframe_all["churned"]).sum())
+                        html(f'<p style="margin:8px 0 14px;font-size:12.5px;'
+                             f'color:{MUTED};line-height:1.6;">Attrition concentrates '
+                             f'around period {int(timing_all.idxmax())} - customers who '
+                             f'survive the early journey stay far longer. The '
+                             f'{censored_n:,} still-active customers are censored, '
+                             f'never miscounted as churned, and anyone who outlives the '
+                             f'data horizon reports "beyond data horizon" rather than a '
+                             f'fabricated estimate.</p>')
+                    lineage("tenure, Churn (censoring flag)",
+                            "A raw event log (user_id + timestamp) powers the "
+                            "engagement-grain view above.")
+
+            # ---------------- LENS C ----------------
+            elif sel_key == "C":
+                if not pipeline.artifact_exists("uplift_model"):
+                    banner("warn", "Lens C", "Uplift artifact not trained yet - "
+                                             "run notebook 03.")
                 else:
-                    up = scored_t["uplift_score"]
-                    top_n = max(1, len(up) // 10)
-                    persuadable = scored_t.nlargest(top_n, "uplift_score")
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("Customers scored", f"{len(scored_t):,}")
-                    m2.metric("Mean uplift", f"{up.mean():+.3f}")
-                    m3.metric("Top-decile mean uplift",
-                              f"{persuadable['uplift_score'].mean():+.3f}")
-                    sleeping = int((up < -0.01).sum())
-                    m4.metric("Sleeping dogs (negative uplift)", f"{sleeping:,}")
+                    html(f'<div style="background:#faf6e8;border:1px solid #ece2c2;'
+                         f'border-radius:16px;padding:26px 28px;text-align:center;'
+                         f'margin-bottom:14px;">'
+                         f'<div class="cl-mono" style="font-size:12px;font-weight:600;'
+                         f'color:#b57d09;margin-bottom:8px;">LENS C - NEEDS CAMPAIGN DATA'
+                         f'</div><div style="font-family:\'Space Grotesk\',sans-serif;'
+                         f'font-size:18px;font-weight:600;margin-bottom:8px;">Uplift '
+                         f'targeting works on an experiment log</div>'
+                         f'<p style="margin:0 auto 14px;font-size:13px;color:#7a6410;'
+                         f'max-width:560px;line-height:1.6;">Classification finds likely '
+                         f'churners; uplift finds persuadable ones - customers where the '
+                         f'offer changes the outcome. Upload a campaign file with these '
+                         f'columns:</p>'
+                         f'<span class="cl-mono" style="font-size:12.5px;font-weight:600;'
+                         f'background:#fff;border:1px solid #ece2c2;border-radius:8px;'
+                         f'padding:7px 14px;margin-right:8px;">treatment_group</span>'
+                         f'<span class="cl-mono" style="font-size:12.5px;font-weight:600;'
+                         f'background:#fff;border:1px solid #ece2c2;border-radius:8px;'
+                         f'padding:7px 14px;">conversion</span></div>')
+                    upload_t = st.file_uploader(
+                        "Campaign file (treatment_group + conversion + campaign features)",
+                        type=["csv", "parquet"], key="target_upload")
+                    if upload_t is not None:
+                        df_t = (pd.read_csv(upload_t) if upload_t.name.endswith(".csv")
+                                else pd.read_parquet(upload_t))
+                        rep_t = pipeline.validate(df_t)
+                        if not rep_t["lenses"]["C"]["ok"]:
+                            banner("err", "Lens C", rep_t["lenses"]["C"]["message"])
+                        else:
+                            scored_t, run_rep = pipeline.score(df_t)
+                            if "uplift_score" not in scored_t.columns:
+                                banner("err", "Uplift scoring failed",
+                                       str(run_rep.get("errors", {}).get(
+                                           "C", "features do not match the trained model")))
+                            else:
+                                up = scored_t["uplift_score"]
+                                top_n = max(1, len(up) // 10)
+                                persuadable = scored_t.nlargest(top_n, "uplift_score")
+                                sleeping = int((up < -0.01).sum())
+                                fresh = {"persuadable": top_n, "sleeping": sleeping}
+                                if st.session_state.get("campaign_scored") != fresh:
+                                    st.session_state["campaign_scored"] = fresh
+                                    st.rerun()
+                                with st.container(border=True):
+                                    section_head("C", "Who can be saved",
+                                                 "uplift model - treatment vs control")
+                                    rec_action(
+                                        f"Direct campaign spend at the {top_n:,} top-decile "
+                                        f"persuadables. Exclude the {sleeping:,} sleeping "
+                                        f"dogs - contacting them increases churn.")
+                                    tile_row([
+                                        tile("Customers scored", f"{len(scored_t):,}",
+                                             accent=BLUE),
+                                        tile("Mean uplift", f"{up.mean():+.3f}",
+                                             accent=GREEN, value_color=GREEN),
+                                        tile("Top-decile uplift",
+                                             f"{persuadable['uplift_score'].mean():+.3f}",
+                                             accent=GREEN, value_color=GREEN),
+                                        tile("Sleeping dogs - negative", f"{sleeping:,}",
+                                             accent=RED, value_color=RED)])
+                                    c1, c2 = st.columns(2)
+                                    with c1:
+                                        html('<div style="font-size:13px;font-weight:700;'
+                                             'margin-bottom:6px;">Who the offer actually '
+                                             'changes</div>')
+                                        st.pyplot(uplift_hist(up))
+                                        html(f'<div style="font-size:11.5px;color:{MUTED};'
+                                             f'line-height:1.5;">Right tail = persuadables '
+                                             f'(spend here); around zero = sure things and '
+                                             f'lost causes; left of zero = sleeping dogs '
+                                             f'(contacting them CAUSES churn).</div>')
+                                    with c2:
+                                        html('<div style="font-size:13px;font-weight:700;'
+                                             'margin-bottom:6px;">The persuadables - top '
+                                             'decile, the campaign call list</div>')
+                                        st.dataframe(persuadable.head(10)[
+                                            [c for c in ("treatment_group", "conversion",
+                                                         "uplift_score")
+                                             if c in persuadable.columns]],
+                                            width="stretch")
+                                        st.download_button(
+                                            "Download persuadables list (CSV)",
+                                            persuadable.to_csv(index=False).encode(),
+                                            "persuadables.csv", "text/csv")
+                                    lineage("treatment_group, conversion + campaign features",
+                                            "Add cost-per-contact to compute an ROI-optimal "
+                                            "budget cutoff instead of a fixed decile.")
 
-                    c1, c2 = st.columns(2)
-                    fig_u, ax_u = plt.subplots(figsize=(6, 3))
-                    ax_u.hist(up, bins=40, color=PALETTE[0])
-                    ax_u.axvline(0, color=CONTEXT_COLOR, linestyle="--", linewidth=1)
-                    ax_u.set_xlabel("Predicted uplift (change in conversion "
-                                    "probability if contacted)")
-                    ax_u.set_ylabel("Customers")
-                    ax_u.set_title("Who the offer actually changes", loc="left",
-                                   fontweight="bold", fontsize=10)
-                    for side in ("top", "right"):
-                        ax_u.spines[side].set_visible(False)
-                    fig_u.tight_layout()
-                    c1.pyplot(fig_u)
-                    c2.markdown("**The persuadables (top decile by uplift)** - "
-                                "this is the campaign call list:")
-                    c2.dataframe(persuadable.head(10)[
-                        [c for c in ("treatment_group", "conversion",
-                                     "uplift_score") if c in persuadable.columns]],
-                        width="stretch")
-                    st.download_button(
-                        "Download persuadables list (CSV)",
-                        persuadable.to_csv(index=False).encode(),
-                        "persuadables.csv", "text/csv")
-                    st.caption("Read the histogram: right tail = persuadables "
-                               "(spend here); around zero = sure things and lost "
-                               "causes (money wasted); left of zero = sleeping "
-                               "dogs (contacting them CAUSES churn).")
+            # ---------------- LENS D ----------------
+            elif sel_key == "D":
+                with st.container(border=True):
+                    k = (training.get("lenses", {}).get("D", {}) or {}).get("k")
+                    section_head("D", "Which segment they belong to",
+                                 f"k-means clustering - k={k} selected automatically"
+                                 if k else "k-means clustering")
+                    if not seg_profiles:
+                        st.info("No segment model in this run.")
+                    else:
+                        base_rate = analytics.get("actual_churn_rate") or analytics.get(
+                            "mean_churn_probability")
+                        if worst_seg and base_rate:
+                            ratio = worst_seg["mean_churn_probability"] / max(base_rate, 1e-9)
+                            rec_action(
+                                f"Cluster {worst_seg['segment']} churns at "
+                                f"{worst_seg['mean_churn_probability']:.0%}, about "
+                                f"{ratio:.1f}x the base rate - fix the root cause there "
+                                f"first.")
+                        sizes = [s["size"] for s in seg_profiles]
+                        labels = [f"cluster {s['segment']}" for s in seg_profiles]
+                        c1, c2 = st.columns([1, 1.3])
+                        with c1:
+                            html('<div style="font-size:13px;font-weight:700;'
+                                 'margin-bottom:8px;">Base composition by segment</div>')
+                            st.pyplot(seg_pie(sizes, labels))
+                        with c2:
+                            html('<div style="font-size:13px;font-weight:700;'
+                                 'margin-bottom:6px;">Segments - pick one to see its '
+                                 'customers</div>')
+                            seg_table = pd.DataFrame([
+                                {"segment": f"cluster {s['segment']}",
+                                 "size": s["size"], "share": f"{s['share']:.0%}",
+                                 "mean churn prob": f"{s['mean_churn_probability']:.0%}"}
+                                for s in seg_profiles])
+                            st.dataframe(seg_table, width="stretch", hide_index=True)
+                            seg_sel = st.segmented_control(
+                                "Segment", labels, default=labels[0], key="seg_sel")
+                        seg_id = int((seg_sel or labels[0]).split(" ")[-1])
+                        if "segment" in scored.columns:
+                            in_seg = scored[scored["segment"] == seg_id]
+                            show_cols = [c for c in ("customerID", "churn_probability",
+                                                     "tenure", "revenue_at_risk")
+                                         if c in scored.columns]
+                            html(f'<div style="font-size:12.5px;font-weight:700;'
+                                 f'margin:6px 0 6px;">Customers in cluster {seg_id} '
+                                 f'({len(in_seg):,})</div>')
+                            table = (in_seg.sort_values("revenue_at_risk", ascending=False)
+                                     if has_rar else in_seg)
+                            st.dataframe(table[show_cols].head(50), width="stretch",
+                                         hide_index=True)
+                        drivers = analytics.get("global_drivers", [])
+                        if drivers:
+                            html('<div style="font-size:13px;font-weight:700;'
+                                 'margin:10px 0 6px;">Global churn drivers - mean effect, '
+                                 'percentage points</div>')
+                            dseries = pd.Series(
+                                {d["feature"]: d["mean_abs_effect_pp"]
+                                 for d in drivers[:8]})
+                            st.pyplot(counts_barh(dseries, value_fmt="+{:.1f}pp",
+                                                  color=RED))
+                        html(f'<p style="margin:8px 0 14px;font-size:12.5px;color:{MUTED};'
+                             f'line-height:1.6;">Churn is not one problem - each segment '
+                             f'leaves for a different reason, and each needs a different '
+                             f'intervention.</p>')
+                        lineage(powered_feats or "all mapped feature columns",
+                                "Add region or acquisition-channel columns for sharper, "
+                                "more actionable clusters.")
 
-st.divider()
-st.markdown("##### About the data behind these predictions")
-st.markdown(
-    "All scores in this application are produced by models trained on **public "
-    "demonstration datasets**:\n\n"
-    "| Lenses | Training dataset | Description |\n"
-    "|---|---|---|\n"
-    "| A - Who churns, B - When, D - Segments | IBM Telco Customer Churn | "
-    "7,043 telecom customers, one point-in-time snapshot |\n"
-    "| C - Who to target | MegaFon uplift experiment | ~600,000 customers from a "
-    "randomized marketing campaign, anonymized features |\n"
-    "| E - Revenue at stake | UCI Online Retail II | 1M+ purchases from a UK "
-    "online gift retailer, Dec 2009 - Dec 2011 |\n")
-st.markdown(
-    "**Scope and intended use:**\n"
-    "- Model outputs are calibrated to the customer populations, prices and "
-    "time periods of the datasets listed above.\n"
-    "- All figures - churn probability, remaining tenure, CLV, revenue at "
-    "risk - are illustrative and intended to demonstrate the workflow, not to "
-    "support decisions about real customers.\n"
-    "- For production use, retrain the models on business-specific labeled "
-    "data: `python -m phase_1.serving.pipeline train --data <file>.csv`. The application "
-    "loads the updated model automatically.")
+            # ---------------- LENS E ----------------
+            elif sel_key == "E":
+                with st.container(border=True):
+                    section_head("E", "What it costs",
+                                 "revenue at risk = churn probability x CLV")
+                    if not has_rar:
+                        st.info("This run has no revenue-at-risk columns (needs tenure + "
+                                "monthly charges, or a transaction log).")
+                    else:
+                        top_n = min(200, max(1, len(scored) // 10))
+                        top_share = (float(scored.nlargest(top_n, "revenue_at_risk")
+                                           ["revenue_at_risk"].sum()) / total_rar
+                                     if total_rar else 0)
+                        rec_action(
+                            f"Route the top {top_n} accounts - {top_share:.0%} of total "
+                            f"exposure - to the retention desk first. Automate offers "
+                            f"for the long tail.")
+                        tiles = [tile("Total revenue at risk", money(total_rar),
+                                      accent=AMBER)]
+                        if len(history) >= 2 and history.values[-2] > 0:
+                            delta = history.values[-1] / history.values[-2] - 1
+                            tiles.append(tile("vs previous run", f"{delta:+.1%}",
+                                              accent=RED,
+                                              value_color=RED if delta > 0 else GREEN))
+                        tiles.append(tile(f"Top {top_n} share", f"{top_share:.0%}",
+                                          accent=BLUE))
+                        tile_row(tiles)
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            if len(history) >= 2:
+                                html('<div style="font-size:13px;font-weight:700;'
+                                     'margin-bottom:6px;">Revenue at risk - trend across '
+                                     'runs</div>')
+                                st.pyplot(trend_chart(history))
+                            else:
+                                html(f'<div style="font-size:12.5px;color:{MUTED};'
+                                     f'padding:20px 4px;">One completed run so far for '
+                                     f'this source - the trend chart appears from the '
+                                     f'second run onward.</div>')
+                        with c2:
+                            html('<div style="font-size:13px;font-weight:700;">Top '
+                                 'customers by revenue at risk</div>'
+                                 f'<div style="font-size:12px;color:{MUTED};'
+                                 f'margin-bottom:6px;">These are the first phone calls '
+                                 f'to make.</div>')
+                            top = scored.nlargest(8, "revenue_at_risk")
+                            names = (top["customerID"] if "customerID" in top.columns
+                                     else top.index.astype(str))
+                            st.pyplot(counts_barh(
+                                pd.Series(top["revenue_at_risk"].values, index=names),
+                                value_fmt="${:,.0f}", color=RED))
+                        trend_note = ""
+                        if len(history) >= 2 and history.values[-2] > 0:
+                            delta = history.values[-1] / history.values[-2] - 1
+                            trend_note = (f"Exposure has "
+                                          f"{'grown' if delta > 0 else 'fallen'} "
+                                          f"{delta:+.1%} since the previous run. ")
+                        html(f'<p style="margin:8px 0 14px;font-size:12.5px;'
+                             f'color:{MUTED};line-height:1.6;">{trend_note}The exposure '
+                             f'is concentrated: the top {top_n} accounts hold '
+                             f'{top_share:.0%} of the total, so a focused retention '
+                             f'effort moves the headline number materially.</p>')
+                        lineage("tenure, MonthlyCharges + lens A probabilities",
+                                "Add gross margin per customer to convert revenue at "
+                                "risk into profit at risk.")
+
+            # ---------------- WHAT-IF on this dataset's own model ----------
+            elif sel_key == "What-if":
+                with st.container(border=True):
+                    html(f'<div style="display:flex;align-items:baseline;'
+                         f'justify-content:space-between;gap:12px;margin:2px 0 12px;'
+                         f'flex-wrap:wrap;"><div style="display:flex;align-items:baseline;'
+                         f'gap:12px;"><span class="cl-mono" style="font-size:12px;'
+                         f'font-weight:600;color:{INK};">WHAT-IF</span>'
+                         f'<span style="font-family:\'Space Grotesk\',sans-serif;'
+                         f'font-size:18px;font-weight:600;">Single customer</span></div>'
+                         f'<span class="cl-mono" style="font-size:11.5px;color:{FAINT};">'
+                         f'scored with the {source} model, not the demo</span></div>')
+                    dataset_id = training.get("dataset_id") or (
+                        reports.get("mode_decision", {}) or {}).get("dataset_id")
+                    kept = [f for f in (training.get("leakage", {}) or {}).get("kept", [])
+                            if f in scored.columns]
+                    if not dataset_id or not kept:
+                        st.info("This run has no trained per-dataset model to "
+                                "score against.")
+                    else:
+                        html(f'<p style="margin:2px 0 10px;font-size:13px;color:{MUTED};">'
+                             'Adjust a hypothetical customer built from the columns this '
+                             'model was actually trained on. Ranges and options come from '
+                             'the integrated data itself.</p>')
+                        with st.form("dash_whatif"):
+                            values = {}
+                            fields = st.columns(min(4, max(1, len(kept))))
+                            for i, feat in enumerate(kept):
+                                col_w = fields[i % len(fields)]
+                                series = scored[feat]
+                                if pd.api.types.is_numeric_dtype(series):
+                                    lo, hi = float(series.min()), float(series.max())
+                                    med = float(series.median())
+                                    values[feat] = col_w.slider(feat, lo, hi, med)
+                                else:
+                                    opts = series.astype(str).value_counts().index[:20]
+                                    values[feat] = col_w.selectbox(feat, list(opts))
+                            submitted = st.form_submit_button(
+                                "Score this customer", type="primary")
+                        if submitted:
+                            row_df = pd.DataFrame([values])
+                            scored_row = auto_train.score_with_dataset_model(
+                                row_df, dataset_id)
+                            try:
+                                scored_row, _ = ins.enrich_and_summarize(
+                                    scored_row, dataset_id)
+                            except Exception:
+                                pass
+                            r = scored_row.iloc[0]
+                            tiles = []
+                            if "churn_probability" in r:
+                                p = float(r["churn_probability"])
+                                band = str(r.get("risk_band", ""))
+                                tiles.append(tile(
+                                    "Churn probability", f"{p:.1%}",
+                                    "how likely this profile leaves", accent=RED,
+                                    value_color=RED if p >= 0.5 else INK,
+                                    tag=band, tag_bg=BAND_COLOR.get(band, RED)))
+                            if "expected_remaining_tenure" in r and pd.notna(
+                                    r["expected_remaining_tenure"]):
+                                tiles.append(tile(
+                                    "Expected remaining tenure",
+                                    f"{r['expected_remaining_tenure']:.0f} periods",
+                                    accent=BLUE))
+                            if "clv_simple" in r and pd.notna(r["clv_simple"]):
+                                tiles.append(tile("Simplified CLV",
+                                                  f"${r['clv_simple']:,.0f}",
+                                                  accent=PURPLE))
+                            if "revenue_at_risk" in r and pd.notna(r["revenue_at_risk"]):
+                                tiles.append(tile("Revenue at risk",
+                                                  f"${r['revenue_at_risk']:,.0f}",
+                                                  "probability x value", accent=INK))
+                            if tiles:
+                                tile_row(tiles)
+                            if "segment" in r and pd.notna(r["segment"]):
+                                html(f'<span style="font-size:12.5px;font-weight:600;'
+                                     f'background:#f0eef8;color:#8a5fb0;border:1px solid '
+                                     f'#e2daf0;padding:6px 13px;border-radius:20px;">'
+                                     f'Segment - cluster {r["segment"]} (Lens D)</span>')
+                            drivers_local = r.get("local_drivers")
+                            if isinstance(drivers_local, (list, np.ndarray)) and len(
+                                    drivers_local):
+                                html('<div style="font-size:13px;font-weight:700;'
+                                     'margin:12px 0 6px;">What drives THIS profile</div>')
+                                items = list(drivers_local)[:5]
+                                rows_html = "".join(
+                                    f'<div class="cl-mono" style="font-size:12px;'
+                                    f'color:{MUTED};line-height:1.8;">{d.get("feature", d)}'
+                                    f' - {d.get("effect_pp", "")}pp</div>'
+                                    if isinstance(d, dict) else
+                                    f'<div class="cl-mono" style="font-size:12px;'
+                                    f'color:{MUTED};line-height:1.8;">{d}</div>'
+                                    for d in items)
+                                html(rows_html)
+                            html(f'<div style="font-size:11.5px;color:{FAINT};'
+                                 f'margin-top:10px;">Lens C (who can be saved) is not '
+                                 f'part of this profile: uplift needs campaign '
+                                 f'experiment columns, which a what-if customer does '
+                                 f'not have.</div>')
+                        lineage(", ".join(kept),
+                                "Every field here is a column the pipeline kept after "
+                                "leakage screening.")
+
+            # ---- closing play (built only from lenses that actually ran)
+            parts = []
+            if bands.get("Critical", 0):
+                parts.append(f"call the <b>{int(bands['Critical']):,} Critical "
+                             f"customers</b> sorted by revenue at risk (A x E)")
+            if len(timing_all):
+                parts.append(f"reach them <b>before period "
+                             f"{int(timing_all.idxmax()) + 1}</b> of their journey (B)")
+            if campaign:
+                parts.append(f"spend campaign budget only on the "
+                             f"<b>{campaign['persuadable']:,} persuadables</b> (C)")
+            if worst_seg:
+                parts.append(f"fix the root cause in <b>cluster "
+                             f"{worst_seg['segment']}</b>, the segment churning at "
+                             f"{worst_seg['mean_churn_probability']:.0%} (D)")
+            if parts:
+                play = ", ".join(parts[:-1]) + (", and " if len(parts) > 1 else "") + parts[-1]
+                html(f'<div style="background:#eef5fb;border:1px solid #cfe2f0;'
+                     f'border-left:4px solid {BLUE};border-radius:14px;padding:18px 22px;'
+                     f'margin-top:14px;"><div class="cl-kicker" style="color:#0b5573;'
+                     f'margin-bottom:6px;">The recommended play - A to E in one line</div>'
+                     f'<p style="margin:0;font-size:14px;line-height:1.65;color:{INK};'
+                     f'max-width:960px;">{play[0].upper() + play[1:]}.</p></div>')
