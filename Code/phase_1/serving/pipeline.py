@@ -251,9 +251,17 @@ def score(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     if report["lenses"]["C"]["ok"] and artifact_exists("uplift_model"):
         try:
             bundle = models.load_model("uplift_model")
-            X = df[bundle["features"]]
-            out["uplift_score"] = np.round(bundle["model"].predict(X), 4)
-            report["applied"].append("C")
+            missing = [c for c in bundle["features"] if c not in df.columns]
+            if missing:
+                report["errors"]["C"] = (
+                    "campaign features do not match the trained uplift model - "
+                    f"it expects {len(bundle['features'])} features "
+                    f"({', '.join(bundle['features'][:3])}, ...) and this file "
+                    f"is missing {len(missing)} of them")
+            else:
+                X = df[bundle["features"]]
+                out["uplift_score"] = np.round(bundle["model"].predict(X), 4)
+                report["applied"].append("C")
         except Exception as exc:
             report["errors"]["C"] = str(exc)
 

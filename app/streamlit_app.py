@@ -898,10 +898,46 @@ with tab_newdata:
                         st.session_state["integ_done"] = m.run_id
                     st.rerun()
 
+        with st.expander("Companion files - optional (event log / campaign)"):
+            html(f'<div style="font-size:12px;color:{MUTED};margin-bottom:8px;">'
+                 'All uploads live here - the Dashboard lenses read these files '
+                 'and never ask for uploads themselves. The event log powers the '
+                 'Lens B engagement view; the campaign file powers Lens C.</div>')
+            up_ev = st.file_uploader(
+                "Event log (csv / parquet) - one row per user activity",
+                type=["csv", "parquet"], key="companion_events_up")
+            if up_ev is not None:
+                try:
+                    ev_df = (pd.read_csv(up_ev) if up_ev.name.endswith(".csv")
+                             else pd.read_parquet(up_ev))
+                    st.session_state["companion_events"] = ev_df
+                    st.caption(f"Event log connected: {len(ev_df):,} rows")
+                except Exception as exc:
+                    banner("err", "Could not read the event log",
+                           f"{type(exc).__name__}: {exc}")
+            else:
+                st.session_state.pop("companion_events", None)
+            up_cp = st.file_uploader(
+                "Campaign file (treatment_group + conversion + features)",
+                type=["csv", "parquet"], key="companion_campaign_up")
+            if up_cp is not None:
+                try:
+                    cp_df = (pd.read_csv(up_cp) if up_cp.name.endswith(".csv")
+                             else pd.read_parquet(up_cp))
+                    st.session_state["companion_campaign"] = cp_df
+                    st.caption(f"Campaign file connected: {len(cp_df):,} rows")
+                except Exception as exc:
+                    banner("err", "Could not read the campaign file",
+                           f"{type(exc).__name__}: {exc}")
+            else:
+                st.session_state.pop("companion_campaign", None)
+
     if st.session_state["session_runs"]:
         if st.button("Remove connected data - reset this session",
                      key="reset_session"):
-            for _k in ("integ_pending", "integ_done", "integ_src"):
+            for _k in ("integ_pending", "integ_done", "integ_src",
+                       "companion_events", "companion_campaign",
+                       "campaign_scored"):
                 st.session_state.pop(_k, None)
             st.session_state["session_runs"] = []
             st.session_state["session_trained"] = set()
@@ -1511,13 +1547,12 @@ with tab_dash:
                         st.markdown("**Churn as stopping showing up.** One row per user "
                                     "activity; retention at a chosen grain with an "
                                     "inactivity window, sliced by any population filter.")
-                        upload_j = st.file_uploader("Event log (csv / parquet)",
-                                                    type=["csv", "parquet"],
-                                                    key="journeys_upload")
-                        if upload_j is not None:
-                            events_j = (pd.read_csv(upload_j)
-                                        if upload_j.name.endswith(".csv")
-                                        else pd.read_parquet(upload_j))
+                        events_j = st.session_state.get("companion_events")
+                        if events_j is None:
+                            st.info("No event log connected - add one under "
+                                    "'Companion files' in 02 Add your data to "
+                                    "unlock this engagement view.")
+                        else:
                             cols = list(events_j.columns)
                             guess_user = next((c for c in cols if "user" in c.lower()
                                                or "id" in c.lower()), cols[0])
@@ -1627,7 +1662,7 @@ with tab_dash:
                          f'<p style="margin:0 auto 14px;font-size:13px;color:#7a6410;'
                          f'max-width:560px;line-height:1.6;">Classification finds likely '
                          f'churners; uplift finds persuadable ones - customers where the '
-                         f'offer changes the outcome. Upload a campaign file with these '
+                         f'offer changes the outcome. Connect a campaign file in 02 Add your data (Companion files) with these '
                          f'columns:</p>'
                          f'<span class="cl-mono" style="font-size:12.5px;font-weight:600;'
                          f'background:#fff;border:1px solid #ece2c2;border-radius:8px;'
@@ -1635,21 +1670,34 @@ with tab_dash:
                          f'<span class="cl-mono" style="font-size:12.5px;font-weight:600;'
                          f'background:#fff;border:1px solid #ece2c2;border-radius:8px;'
                          f'padding:7px 14px;">conversion</span></div>')
-                    upload_t = st.file_uploader(
-                        "Campaign file (treatment_group + conversion + campaign features)",
-                        type=["csv", "parquet"], key="target_upload")
-                    if upload_t is not None:
-                        df_t = (pd.read_csv(upload_t) if upload_t.name.endswith(".csv")
-                                else pd.read_parquet(upload_t))
+                    df_t = st.session_state.get("companion_campaign")
+                    if df_t is None:
+                        st.info("No campaign file connected - add one under "
+                                "'Companion files' in 02 Add your data to unlock "
+                                "uplift targeting.")
+                    else:
                         rep_t = pipeline.validate(df_t)
                         if not rep_t["lenses"]["C"]["ok"]:
                             banner("err", "Lens C", rep_t["lenses"]["C"]["message"])
                         else:
                             scored_t, run_rep = pipeline.score(df_t)
                             if "uplift_score" not in scored_t.columns:
-                                banner("err", "Uplift scoring failed",
-                                       str(run_rep.get("errors", {}).get(
-                                           "C", "features do not match the trained model")))
+                                err_c = str(run_rep.get("errors", {}).get(
+                                    "C", "features do not match the trained model"))
+                                if "do not match the trained uplift model" in err_c:
+                                    banner("err",
+                                           "This campaign file does not fit the "
+                                           "demo uplift model", err_c + ". Uplift "
+                                           "models are campaign-specific by nature: "
+                                           "the demo artifact was trained on the "
+                                           "MegaFon experiment (features X_1 to "
+                                           "X_50), so it can only score files with "
+                                           "that shape. Try the demo campaign file "
+                                           "to see the flow, or train an uplift "
+                                           "model on this campaign log via "
+                                           "notebook 03.")
+                                else:
+                                    banner("err", "Uplift scoring failed", err_c)
                             else:
                                 up = scored_t["uplift_score"]
                                 top_n = max(1, len(up) // 10)
