@@ -174,3 +174,23 @@ def test_failure_is_recorded_not_raised(bank_frame, registry, monkeypatch):
 
     with pytest.raises(RuntimeError):
         run_pipeline(bank_frame, "bank-crm", registry=registry, raise_on_error=True)
+
+
+def test_force_train_ignores_existing_artifacts(labeled_frame, registry):
+    """A session that never trained a source must get fresh models even when
+    artifacts exist on disk (another session's, or leftovers from a crash)."""
+    m1 = run_pipeline(labeled_frame, "retrain-me", autonomy_level=1,
+                      registry=registry, raise_on_error=True)
+    assert m1.data["reports"]["mode_decision"]["mode"] == "train"
+
+    m2 = run_pipeline(labeled_frame, "retrain-me", autonomy_level=1,
+                      registry=registry, raise_on_error=True)
+    assert m2.data["reports"]["mode_decision"]["mode"] == "score"
+    assert m2.data["stages"]["train"]["status"] == rm.SKIPPED
+
+    m3 = run_pipeline(labeled_frame, "retrain-me", autonomy_level=1,
+                      registry=registry, raise_on_error=True, force_train=True)
+    assert m3.data["reports"]["mode_decision"]["mode"] == "train"
+    assert m3.data["stages"]["train"]["status"] == rm.DONE
+    assert any("fresh training requested" in r
+               for r in m3.data["reports"]["mode_decision"]["reasons"])

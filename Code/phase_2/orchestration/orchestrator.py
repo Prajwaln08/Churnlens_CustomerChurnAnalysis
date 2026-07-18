@@ -63,6 +63,7 @@ def run_pipeline(
     use_llm: bool = True,
     registry: Registry | None = None,
     proposal_override: dict | None = None,
+    force_train: bool = False,
     raise_on_error: bool = False,
 ) -> RunManifest:
     """Run one dataset through the stage chain. Always returns the manifest -
@@ -72,7 +73,7 @@ def run_pipeline(
     m = RunManifest(source_name, autonomy_level=autonomy_level)
     try:
         _run(df, m, registry, autonomy_level, min_confidence,
-             use_llm, proposal_override)
+             use_llm, proposal_override, force_train)
     except Exception:
         registry.record_run(m.data)
         if raise_on_error:
@@ -80,7 +81,7 @@ def run_pipeline(
     return m
 
 
-def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_override):
+def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_override, force_train=False):
     # ---------------------------------------------------------------- ingest
     with m.stage("ingest"):
         origin, fetched_at = "dataframe", None
@@ -190,7 +191,8 @@ def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_over
 
     # ---------------------------------------------------------------- mode
     with m.stage("mode"):
-        decision = mode_mod.decide(cleaned, m.data["source"])
+        decision = mode_mod.decide(cleaned, m.data["source"],
+                                   force_train=force_train)
         m.attach_report("mode_decision", decision)
         m.add_note("mode", f"decision: {decision['mode'].upper()} - "
                            + "; ".join(decision["reasons"]))

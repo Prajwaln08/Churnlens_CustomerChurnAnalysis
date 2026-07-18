@@ -12,6 +12,7 @@ training, scoring) lives in Code/, so CLI, notebooks and UI cannot disagree.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import io
 import sys
 from pathlib import Path
@@ -448,10 +449,12 @@ def load_run_bundle(run_id: str) -> dict | None:
 
 
 @st.cache_data(show_spinner=False)
-def rar_history(source: str) -> pd.Series:
-    """Total revenue at risk per completed run of this source, oldest first."""
+def rar_history(source: str, allowed: tuple[str, ...]) -> pd.Series:
+    """Total revenue at risk per completed run of this source, oldest first.
+    Only runs made in this browser session count - nothing leaks across users."""
     runs = Registry().all_runs()
-    runs = runs[(runs["source_name"] == source) & (runs["status"] == "completed")]
+    runs = runs[(runs["source_name"] == source) & (runs["status"] == "completed")
+                & runs["run_id"].isin(allowed)]
     totals = {}
     for _, r in runs.iloc[::-1].iterrows():
         try:
@@ -525,8 +528,15 @@ def money(v: float) -> str:
 # Top frame: logo, data source, lens chips, lens explainer
 # ---------------------------------------------------------------------------
 
+st.session_state.setdefault("session_runs", [])
+st.session_state.setdefault("session_trained", set())
+_mine = st.session_state["session_runs"]
 runs_all = Registry().all_runs()
+if not runs_all.empty:
+    runs_all = runs_all[runs_all["run_id"].isin(_mine)].reset_index(drop=True)
 completed = completed_runs_with_scores()
+if not completed.empty:
+    completed = completed[completed["run_id"].isin(_mine)].reset_index(drop=True)
 has_completed = not completed.empty
 
 html(f'<div style="display:flex;align-items:center;gap:11px;margin-top:2px;">'
@@ -565,10 +575,11 @@ html(f'<div style="display:flex;align-items:center;gap:11px;margin-top:2px;">'
      'all land on a ledger - and the analytics run at both population and individual '
      'level.</p>')
 
-_lock = "" if has_completed else " :lock:"
+_lock_p = "" if not runs_all.empty else " :lock:"
+_lock_d = "" if has_completed else " :lock:"
 tab_whatif, tab_newdata, tab_process, tab_dash = st.tabs(
-    ["01  What-if", "02  Add your data", f"03  Process{_lock}",
-     f"04  Dashboard{_lock}"])
+    ["01  What-if", "02  Add your data", f"03  Process{_lock_p}",
+     f"04  Dashboard{_lock_d}"])
 
 # ---------------------------------------------------------------------------
 # 01 WHAT-IF
@@ -755,11 +766,17 @@ with tab_newdata:
                                         key="integrate_upload")
             if upload_i is not None:
                 suffix = Path(upload_i.name).suffix.lower()
-                df_i = (pd.read_csv(upload_i) if suffix == ".csv"
-                        else pd.read_excel(upload_i) if suffix in (".xlsx", ".xls")
-                        else pd.read_parquet(upload_i))
-                payload = connectors.from_dataframe(df_i, name=upload_i.name)
-                default_name = Path(upload_i.name).stem
+                try:
+                    df_i = (pd.read_csv(upload_i) if suffix == ".csv"
+                            else pd.read_excel(upload_i) if suffix in (".xlsx", ".xls")
+                            else pd.read_parquet(upload_i))
+                except Exception as exc:
+                    df_i = None
+                    banner("err", "Could not read this file",
+                           f"{type(exc).__name__}: {exc}")
+                if df_i is not None:
+                    payload = connectors.from_dataframe(df_i, name=upload_i.name)
+                    default_name = Path(upload_i.name).stem
 
         elif src_kind == "Database":
             db_url = st.text_input(
@@ -809,6 +826,15 @@ with tab_newdata:
                 payload, df_i = fetched, fetched.frame
                 default_name = api_url.rstrip("/").split("/")[-1] if api_url else "api"
 
+        MAX_TEST_ROWS = 100_000
+        if df_i is not None and len(df_i) > MAX_TEST_ROWS:
+            _orig_rows = len(df_i)
+            df_i = df_i.sample(MAX_TEST_ROWS, random_state=42).reset_index(drop=True)
+            if payload is not None:
+                payload = dataclasses.replace(payload, frame=df_i)
+            banner("warn", "Large file - sampled for this test run",
+                   f"{_orig_rows:,} rows exceeds the test portal budget; running on "
+                   f"a random {MAX_TEST_ROWS:,}-row sample to stay fast and stable.")
         if df_i is not None:
             html(f'<div style="border-top:1px solid #eeebe3;margin:6px 0 10px;"></div>'
                  f'<div style="font-size:12px;font-weight:600;color:#0a6b4c;'
@@ -829,18 +855,42 @@ with tab_newdata:
             if st.button("Run pipeline", type="primary", disabled=not source_i,
                          key="run_pipeline_btn"):
                 st.session_state.pop("integ_pending", None)
-                with st.spinner("Running the staged pipeline (a new schema may take "
-                                "~1 min while the local LLM proposes the mapping)..."):
-                    m = run_pipeline(payload if payload is not None else df_i,
-                                     source_i, autonomy_level=level_i)
-                if m.status == "paused":
-                    st.session_state["integ_pending"] = {
-                        "proposal": m.data["reports"]["mapping_proposal"],
-                        "source": source_i, "run_id": m.run_id}
-                else:
-                    st.session_state["integ_done"] = m.run_id
-                load_run_bundle.clear()
-                rar_history.clear()
+                m = None
+                try:
+                    with st.spinner("Running the staged pipeline (a new schema may "
+                                    "take ~1 min while the local LLM proposes the "
+                                    "mapping)..."):
+                        m = run_pipeline(
+                            payload if payload is not None else df_i,
+                            source_i, autonomy_level=level_i,
+                            force_train=(source_i not in
+                                         st.session_state["session_trained"]))
+                except Exception as exc:
+                    banner("err", "Run failed", f"{type(exc).__name__}: {exc}")
+                if m is not None:
+                    st.session_state["session_runs"].append(m.run_id)
+                    if m.status == "completed":
+                        st.session_state["session_trained"].add(source_i)
+                    load_run_bundle.clear()
+                    rar_history.clear()
+                    if m.status == "paused":
+                        st.session_state["integ_pending"] = {
+                            "proposal": m.data["reports"]["mapping_proposal"],
+                            "source": source_i, "run_id": m.run_id}
+                    else:
+                        st.session_state["integ_done"] = m.run_id
+                    st.rerun()
+
+    if st.session_state["session_runs"]:
+        if st.button("Remove connected data - reset this session",
+                     key="reset_session"):
+            for _k in ("integ_pending", "integ_done", "integ_src"):
+                st.session_state.pop(_k, None)
+            st.session_state["session_runs"] = []
+            st.session_state["session_trained"] = set()
+            load_run_bundle.clear()
+            rar_history.clear()
+            st.rerun()
 
     with col_main:
         pending = st.session_state.get("integ_pending")
@@ -904,15 +954,26 @@ with tab_newdata:
                 override = {"engine": "human-confirmed",
                             "mappings": confirmed_mappings,
                             "quarantine": prop.get("quarantine", [])}
-                with st.spinner("Running with the confirmed mapping..."):
-                    m = run_pipeline(payload if payload is not None else df_i,
-                                     pending["source"], autonomy_level=0,
-                                     proposal_override=override)
-                st.session_state.pop("integ_pending", None)
-                st.session_state["integ_done"] = m.run_id
-                load_run_bundle.clear()
-                rar_history.clear()
-                st.rerun()
+                m = None
+                try:
+                    with st.spinner("Running with the confirmed mapping..."):
+                        m = run_pipeline(
+                            payload if payload is not None else df_i,
+                            pending["source"], autonomy_level=0,
+                            proposal_override=override,
+                            force_train=(pending["source"] not in
+                                         st.session_state["session_trained"]))
+                except Exception as exc:
+                    banner("err", "Run failed", f"{type(exc).__name__}: {exc}")
+                if m is not None:
+                    st.session_state.pop("integ_pending", None)
+                    st.session_state["session_runs"].append(m.run_id)
+                    if m.status == "completed":
+                        st.session_state["session_trained"].add(pending["source"])
+                    st.session_state["integ_done"] = m.run_id
+                    load_run_bundle.clear()
+                    rar_history.clear()
+                    st.rerun()
 
         if done_id and not pending:
             bundle = load_run_bundle(done_id)
@@ -1122,7 +1183,8 @@ with tab_dash:
 
             has_rar = "revenue_at_risk" in scored.columns
             total_rar = float(scored["revenue_at_risk"].sum()) if has_rar else None
-            history = rar_history(source) if has_rar else pd.Series(dtype=float)
+            history = (rar_history(source, tuple(_mine))
+                       if has_rar else pd.Series(dtype=float))
             delta_chip = ""
             if len(history) >= 2 and history.values[-2] > 0:
                 delta = history.values[-1] / history.values[-2] - 1

@@ -34,23 +34,30 @@ def dataset_id_for(source_name: str) -> str:
     return "".join(c if c.isalnum() else "-" for c in source_name.lower()).strip("-")
 
 
-def decide(df: pd.DataFrame, source_name: str) -> dict:
+def decide(df: pd.DataFrame, source_name: str,
+           force_train: bool = False) -> dict:
     """Returns {"mode", "dataset_id", "reasons": [...]}. Pure function of the
-    mapped frame + artifact presence - no side effects."""
+    mapped frame + artifact presence - no side effects. force_train skips
+    artifact reuse entirely: a label present means fresh training, even when
+    older artifacts exist (e.g. left behind by another session or a crash)."""
     dataset_id = dataset_id_for(source_name)
     reasons: list[str] = []
 
-    # 1) per-dataset artifacts win: this source was trained before
-    if pipeline.artifact_exists("churn_pipeline", dataset_id=dataset_id):
-        reasons.append(f"trained artifacts exist for dataset '{dataset_id}'")
-        return {"mode": SCORE, "dataset_id": dataset_id, "reasons": reasons}
+    if force_train:
+        reasons.append("fresh training requested - existing artifacts ignored")
+    else:
+        # 1) per-dataset artifacts win: this source was trained before
+        if pipeline.artifact_exists("churn_pipeline", dataset_id=dataset_id):
+            reasons.append(f"trained artifacts exist for dataset '{dataset_id}'")
+            return {"mode": SCORE, "dataset_id": dataset_id, "reasons": reasons}
 
-    # 2) global artifacts apply when the data satisfies the canonical contract
-    lens_report = pipeline.validate(df)
-    if lens_report["lenses"]["A"]["ok"] and pipeline.artifact_exists("churn_pipeline"):
-        reasons.append("data satisfies the canonical schema and global "
-                       "artifacts are trained")
-        return {"mode": SCORE, "dataset_id": dataset_id, "reasons": reasons}
+        # 2) global artifacts apply when the data satisfies the canonical contract
+        lens_report = pipeline.validate(df)
+        if (lens_report["lenses"]["A"]["ok"]
+                and pipeline.artifact_exists("churn_pipeline")):
+            reasons.append("data satisfies the canonical schema and global "
+                           "artifacts are trained")
+            return {"mode": SCORE, "dataset_id": dataset_id, "reasons": reasons}
 
     # 3) a mapped label -> train fresh artifacts for this dataset
     if LABEL_COL in df.columns:
