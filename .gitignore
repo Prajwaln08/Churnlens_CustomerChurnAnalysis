@@ -1,10 +1,11 @@
-# Secrets / local config — keys never go to git
+# Secrets / local config - keys never go to git
 .env
 *.pem
 *.key
 secrets/
 
-# Docs & planning notes stay local — code only in git
+# Docs & planning notes stay local - code only in git
+docs/
 *.md
 *.html
 # ...except the portfolio README (decision: whitelisted, July 2026)

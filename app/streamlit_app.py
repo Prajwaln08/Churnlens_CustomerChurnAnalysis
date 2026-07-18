@@ -32,7 +32,8 @@ from phase_2.mapping import CANONICAL  # noqa: E402
 from phase_2.training import auto_train  # noqa: E402
 from phase_2.orchestration import Registry, RunManifest, run_pipeline  # noqa: E402
 
-st.set_page_config(page_title="ChurnLens", layout="wide")
+st.set_page_config(page_title="ChurnLens - Customer Churn Analytics Suite",
+                   layout="wide")
 
 # ---------------------------------------------------------------------------
 # Design tokens (ChurnLens.dc.html)
@@ -532,8 +533,12 @@ html(f'<div style="display:flex;align-items:center;gap:11px;margin-top:2px;">'
      f'<div style="width:18px;height:18px;border-radius:50%;border:3.5px solid {BLUE};'
      f'position:relative;"><div style="position:absolute;width:6px;height:6px;'
      f'background:{RED};border-radius:50%;right:-4px;bottom:-4px;"></div></div>'
+     f'<div style="display:flex;align-items:baseline;gap:10px;">'
      f'<span style="font-family:\'Space Grotesk\',sans-serif;font-weight:700;'
-     f'font-size:34px;letter-spacing:-.02em;">ChurnLens</span></div>'
+     f'font-size:34px;letter-spacing:-.02em;">ChurnLens</span>'
+     f'<span style="font-family:\'Space Grotesk\',sans-serif;font-weight:500;'
+     f'font-size:21px;letter-spacing:-.01em;color:{MUTED};">- Customer Churn '
+     f'Analytics Suite</span></div></div>'
      f'<p style="font-size:14px;color:{MUTED};line-height:1.65;'
      f'margin:12px 0 2px;">ChurnLens is a data-agnostic churn analytics tool: it turns '
      f'any customer dataset into retention decisions. Bring data from a file, database '

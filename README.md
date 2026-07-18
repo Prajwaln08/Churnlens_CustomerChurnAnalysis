@@ -3,13 +3,12 @@
 One tool, five questions about every customer base: **who** will leave, **when**,
 **who can be saved**, **which segments** exist, and **what it costs to do nothing**.
 
-Built as a complete data-science project: three public datasets, five modeling lenses,
-a leakage-safe scikit-learn pipeline, and a deployable scoring tool with a what-if UI -
-prototyped in notebooks, productionized into importable packages (`phase_1` for the
-local analytics suite, `phase_2` for the growing production pipeline).
+Built as a complete data-science project in two parts: a five-lens analytics suite
+proven on three public datasets (`phase_1`), and a data-agnostic production pipeline
+that takes any customer dataset - file, database or API - through a staged, audited
+flow to a live dashboard (`phase_2`). Prototyped in notebooks, productionized into
+importable packages, served through a Streamlit app, a REST API and an MCP server.
 
-> **Live demo:** _deploy in progress - link coming here_
-> **Portfolio:** _[add portfolio link]_
 
 ---
 
@@ -21,7 +20,7 @@ local analytics suite, `phase_2` for the growing production pipeline).
 | B - Survival | When will they leave? | Kaplan-Meier, Cox PH, Weibull AFT | C-index **0.86**; a quarter of the base has <=2 expected months left |
 | C - Uplift | Who can a campaign actually save? | T-learner (best of 3 meta-learners) | uplift@10% = **44pp** vs +5pp average effect (~9x targeting efficiency) |
 | D - Segmentation | What customer groups exist? | K-Means (silhouette-selected k) + RFM | churn 18.6% vs 31.7% across Telco clusters; 4 lifecycle segments in retail |
-| E - CLV | What is each customer worth? | BG/NBD + Gamma-Gamma, holdout-validated | MAE ~1 purchase on 6-month holdout; mean 12-mo CLV £1,394 |
+| E - CLV | What is each customer worth? | BG/NBD + Gamma-Gamma, holdout-validated | MAE ~1 purchase on 6-month holdout; mean 12-mo CLV 1,394 GBP |
 
 **The synthesis:** Revenue-at-Risk = P(churn) x CLV per customer -
 **$3.6M** across the 7,043-customer demo base, with 31% of it concentrated
@@ -44,13 +43,30 @@ Non-contractual churn is visible without any label - typical retail cohort keeps
 
 ![Cohort retention](assets/cohort_retention.png)
 
+## The platform, proven on demo integrations
+
+Every scenario below was run end to end through the real UI against the demo
+datasets; the numbers are actual outputs, illustrative of the workflow.
+
+| Scenario | What the pipeline did | Result |
+|---|---|---|
+| Telco batch (300 customers) | validated columns, scored lenses A/B/D/E | $152,017 total revenue at risk; risk bands + top-10 call list |
+| Raw transaction log (3,928 rows) | recognised the shape, routed to lens E only | RFM segments + 12-month CLV of 217,594 GBP |
+| Foreign bank export (2,000 rows, 9 renamed columns) | local LLM proposed the schema mapping, human gate confirmed, TRAIN mode trained fresh models | 8/9 columns mapped correctly, 1 correctly left unmapped; test ROC-AUC 0.8416; id-like column quarantined as a leakage risk |
+| Second upload from the same source | replayed the confirmed mapping, no LLM call | ~36s first proposal vs ~0.1s replay |
+| Health-app event log (1,001 users) | engagement churn at weekly grain, sliced by condition | 91.4% churned, most common exit in week 2; retention@8 of 0.221 vs 0.098 across the condition slice |
+| Campaign file (1,500 customers) | uplift scoring for targeting | mean uplift +0.039, top-decile +0.336; 510 sleeping dogs flagged (contacting them increases churn) |
+| Broken file (tenure removed) | validation refused to score | every lens reports "not available in this data" with the reason - nothing fails silently |
+| Drifted scoring batch | PSI against the training baseline | PSI 3.88 alert with "retraining recommended" |
+
 ## What makes it a tool, not a notebook
 
 - **Schema contracts + validation:** upload any customer file; the tool reports which
   lenses the columns support and exactly what is missing - nothing fails silently.
 - **Leakage-safe by construction:** stratified split before any fitting, all
   transformers inside sklearn Pipelines, fitted preprocessors reused at scoring time
-  (never refit), survival covariates screened for duration leakage.
+  (never refit), survival covariates screened for duration leakage, id-like and
+  post-outcome columns quarantined before training.
 - **Cost-aware decisions:** the classification threshold is chosen by a business cost
   matrix (missed churner vs retention offer), not the 0.5 default - and shown to be
   stable across cost assumptions.
@@ -58,6 +74,23 @@ Non-contractual churn is visible without any label - typical retail cohort keeps
   against what customers actually did in the final 180 days.
 - **Self-bootstrapping deployment:** a fresh install trains its demo models from the
   public Telco dataset on first boot - no artifacts needed in git.
+- **Tested:** 94 tests cover profiling, mapping, orchestration, training, drift,
+  analytics, connectors and both serving doors; they run offline in CI on every push.
+
+## The app - four steps
+
+1. **What-if** - a single-customer form scored against demo models trained on the
+   public IBM Telco dataset; a test account to try the tool before integrating data.
+2. **Add your data** - bring a file, database table or REST API. The pipeline
+   profiles it, the local LLM proposes a mapping to the canonical schema, and an
+   autonomy gate decides whether a human reviews it first (Level 0) or the run
+   proceeds unattended (Level 1).
+3. **Process** - the run registry: every stage with status, timing, row counts and
+   a plain-English decision ledger, plus the audited LLM narrative of the run.
+4. **Dashboard** - unlocked once a run completes. Population analytics per lens
+   (A to E), each with its own KPIs, charts, drill tables, narration and lineage,
+   plus a what-if section that scores hypothetical customers on the integrated
+   dataset's own model with per-profile driver explanations.
 
 ## Quickstart
 
@@ -77,13 +110,21 @@ python -m phase_1.serving.pipeline score --input your_customers.csv
 # retrain on new labeled data
 python -m phase_1.serving.pipeline train --data labeled.csv
 
+# REST serving door
+uvicorn phase_2.api.rest:app
+
+# MCP server (AI agents operate the pipeline conversationally)
+python -m phase_2.api.mcp_server
+
 # run the test suite
 python -m pytest tests/ -q   # from the project root
 ```
 
 Full analysis: run the notebooks in order (`Code/01_...` to `Code/05_...`).
 Notebooks 01-02 need the datasets in `Dataset/` (sources below); the MegaFon uplift
-dataset downloads itself on first use.
+dataset downloads itself on first use. The schema-mapping and narration features use
+a local Ollama model (`qwen2.5:7b-instruct`); without it the pipeline falls back to
+deterministic fuzzy matching and template narration.
 
 ## Repository structure
 
@@ -103,11 +144,19 @@ Code/
     evaluation/      evaluation.py
     serving/         pipeline.py (contracts, validation, scoring, CLI)
   phase_2/                       # the production pipeline (any dataset, staged runs)
-    profiling/       profiler.py
-    mapping/         mapping.py
-    orchestration/   run_manifest.py
-tests/                           # one test file per phase_2 module + shared fixtures
-app/streamlit_app.py             # ChurnLens UI (what-if + batch scoring)
+    ingestion/       connectors.py (file / database / REST API, watermarks)
+    profiling/       profiler.py (roles, label candidates, collinearity)
+    mapping/         mapping.py (local-LLM proposals, fuzzy fallback, value maps)
+    orchestration/   orchestrator.py, run_manifest.py, registry.py
+    training/        auto_train.py, leakage.py, mode.py
+    monitoring/      drift.py (PSI vs training baseline)
+    analytics/       insights.py, journeys.py (population + individual level)
+    narration/       narrator.py (grounded summaries, number audit)
+    api/             rest.py (FastAPI), mcp_server.py (MCP door)
+tests/                           # 94 tests, offline by design, run in CI
+app/streamlit_app.py             # the ChurnLens UI (four-step flow above)
+assets/                          # README charts
+docs/                            # local design and planning notes (not committed)
 requirements.txt
 ```
 
@@ -129,15 +178,15 @@ business-specific data (`python -m phase_1.serving.pipeline train`).
 
 ## The production pipeline (phase_2) - any dataset, end to end
 
-The design above is implemented: `Code/phase_2/` is a data-agnostic churn platform
-that takes ANY customer dataset and runs a staged, fully-audited pipeline:
+`Code/phase_2/` is a data-agnostic churn platform that takes ANY customer dataset
+and runs a staged, fully-audited pipeline:
 
 ```
 ingest -> profile -> map -> validate -> clean -> EDA -> mode -> train -> score -> drift -> persist -> narrate
 ```
 
 - **Connectors** (files / SQL databases / REST APIs) all end at one internal shape;
-  credentials are redacted, predicate pushdown supported.
+  credentials are redacted, predicate pushdown and incremental watermarks supported.
 - **Local-LLM schema mapping** (Ollama, qwen2.5:7b) - foreign column names and value
   levels are mapped to the canonical schema; proposals are confidence-gated,
   human-confirmable, saved per source and reused forever. Data never leaves the machine.
@@ -151,6 +200,9 @@ ingest -> profile -> map -> validate -> clean -> EDA -> mode -> train -> score -
   threshold surfaces "retraining recommended".
 - **Grounded LLM narration** - run summaries written by the local model with a number
   audit: any figure not present in the computed facts rejects the text entirely.
+- **Analytics at two levels** - population (drivers, segments, lift, retention curves,
+  revenue at risk) and individual (local driver deltas, journey outlook, expected
+  remaining tenure per customer).
 - **Three doors, one engine**: the Streamlit app, a FastAPI service
   (`uvicorn phase_2.api.rest:app`), and an MCP server so AI agents can operate the
   pipeline conversationally (`python -m phase_2.api.mcp_server`).
