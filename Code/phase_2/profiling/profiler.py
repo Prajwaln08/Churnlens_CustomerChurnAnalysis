@@ -25,7 +25,8 @@ CONSTANT = "constant"
 
 _DATEISH = re.compile(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}")
 _LABELISH_NAMES = re.compile(r"churn|conversion|converted|target|label|outcome|attrit", re.I)
-_POST_OUTCOME_NAMES = re.compile(r"cancel|close[_ ]?reason|exit|termination|deactivat", re.I)
+_POST_OUTCOME_NAMES = re.compile(
+    r"cancel|close[_ ]?reason|exit|termination|deactivat|churn|attrit", re.I)
 _ID_NAMES = re.compile(r"(^|[_ ])(id|uuid|guid|ref|key)([_ ]|$)|customer[_ ]?id|cust[_ ]?(id|ref)", re.I)
 
 

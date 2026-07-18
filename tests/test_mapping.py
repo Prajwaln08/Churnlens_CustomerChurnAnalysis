@@ -1,4 +1,5 @@
 """Tests for Code/phase_2/mapping.py - proposer, sanitizer, fallback, executor."""
+import pandas as pd
 import pytest
 
 from phase_2 import mapping, profiler
@@ -115,3 +116,25 @@ def test_apply_mapping_collision_keeps_higher_confidence(bank_frame):
     out, report = mapping.apply_mapping(bank_frame, prop)
     assert report["renamed"] == {"monthly_fee": "MonthlyCharges"}
     assert report["collisions_skipped"] == ["total_billed"]
+
+
+def test_apply_mapping_when_target_already_in_frame():
+    """Regression: a newer export may already carry a canonical column while
+    the saved mapping still renames a source onto that same name. The rename
+    must be skipped (reported), never producing duplicate columns."""
+    frame = pd.DataFrame({
+        "churn_flag": ["Yes", "No"],
+        "Churn": ["No", "Yes"],            # canonical name already present
+        "months": [3, 40],
+    })
+    proposal = {"engine": "test", "mappings": [
+        {"source": "churn_flag", "target": "Churn", "confidence": 1.0,
+         "value_map": None},
+        {"source": "months", "target": "tenure", "confidence": 1.0,
+         "value_map": None},
+    ]}
+    mapped, report = mapping.apply_mapping(frame, proposal)
+    assert list(mapped.columns).count("Churn") == 1
+    assert "churn_flag" in report["collisions_skipped"]
+    assert "churn_flag" in mapped.columns          # kept as an extra, not lost
+    assert report["renamed"] == {"months": "tenure"}

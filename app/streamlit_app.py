@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import io
+import re
 import sys
 from pathlib import Path
 
@@ -152,6 +153,19 @@ def tile_row(tiles: list[str]) -> None:
     n = len(tiles)
     html(f'<div style="display:grid;grid-template-columns:repeat({n},1fr);gap:12px;'
          f'margin-bottom:16px;">' + "".join(tiles) + "</div>")
+
+
+def stage_streamer(live):
+    """Writer for run_pipeline(progress=...): one line per finished stage."""
+    def write(name, entry):
+        el = entry.get("elapsed_s")
+        line = f"{name} - {entry['status']} ({el:.1f}s)" if el is not None \
+            else f"{name} - {entry['status']}"
+        notes = entry.get("notes") or []
+        if notes:
+            line += " - " + str(notes[0])[:110]
+        live.write(line)
+    return write
 
 
 def banner(kind: str, title: str, body: str, credit: str = "") -> None:
@@ -857,14 +871,17 @@ with tab_newdata:
                 st.session_state.pop("integ_pending", None)
                 m = None
                 try:
-                    with st.spinner("Running the staged pipeline (a new schema may "
-                                    "take ~1 min while the local LLM proposes the "
-                                    "mapping)..."):
+                    with st.status("Running the staged pipeline - stages appear "
+                                   "here as they finish (a new schema may take "
+                                   "~1 min at the mapping step)",
+                                   expanded=True) as live:
                         m = run_pipeline(
                             payload if payload is not None else df_i,
                             source_i, autonomy_level=level_i,
                             force_train=(source_i not in
-                                         st.session_state["session_trained"]))
+                                         st.session_state["session_trained"]),
+                            progress=stage_streamer(live))
+                        live.update(label="Pipeline finished", state="complete")
                 except Exception as exc:
                     banner("err", "Run failed", f"{type(exc).__name__}: {exc}")
                 if m is not None:
@@ -956,13 +973,17 @@ with tab_newdata:
                             "quarantine": prop.get("quarantine", [])}
                 m = None
                 try:
-                    with st.spinner("Running with the confirmed mapping..."):
+                    with st.status("Running with the confirmed mapping - stages "
+                                   "appear here as they finish",
+                                   expanded=True) as live:
                         m = run_pipeline(
                             payload if payload is not None else df_i,
                             pending["source"], autonomy_level=0,
                             proposal_override=override,
                             force_train=(pending["source"] not in
-                                         st.session_state["session_trained"]))
+                                         st.session_state["session_trained"]),
+                            progress=stage_streamer(live))
+                        live.update(label="Pipeline finished", state="complete")
                 except Exception as exc:
                     banner("err", "Run failed", f"{type(exc).__name__}: {exc}")
                 if m is not None:
@@ -989,8 +1010,8 @@ with tab_newdata:
                     ("#eaf6ef", "#bfe3cf", GREEN, "#0a6b4c") if ok
                     else ("#fbeae4", "#f0cabb", RED, "#8a2f08"))
                 title = ("Pipeline complete" if ok else f"Pipeline {status}")
-                sub = (f"{n_done}/12 stages done - models persisted, Dashboard unlocked"
-                       if ok else "see the stage notes below")
+                sub = (f"{n_done}/12 stages done - models persisted"
+                       if ok else "the failing stage is detailed in 03 Process")
                 html(f'<div style="display:flex;align-items:center;gap:14px;background:{head_bg};'
                      f'border:1px solid {head_line};border-radius:13px;padding:14px 18px;'
                      f'margin-bottom:14px;">'
@@ -1059,15 +1080,15 @@ with tab_newdata:
                              f'<div style="display:grid;grid-template-columns:repeat(3,1fr);'
                              f'gap:10px;">{cells}</div>')
 
-                html('<div style="font-size:13.5px;font-weight:700;margin:14px 0 8px;">'
-                     'Stage ledger</div>')
-                status_table(stage_frame[["stage", "status", "elapsed_s",
-                                          "rows_out", "notes"]].fillna("-"))
                 if ok:
-                    banner("ok", "Dashboard unlocked",
-                           "All lenses trained and scored for this source. Open the "
-                           "04 Dashboard tab for the full story, or the 03 Process tab "
-                           "for backend detail.")
+                    banner("ok", "03 Process and 04 Dashboard are now unlocked",
+                           "The full stage ledger, decision log and reports for this "
+                           "run live in 03 Process; population and individual "
+                           "analytics live in 04 Dashboard.")
+                else:
+                    banner("err", "Run failed - open 03 Process",
+                           "The stage ledger there shows exactly which stage stopped "
+                           "and why - nothing fails silently.")
 
 # ---------------------------------------------------------------------------
 # 03 PROCESS
@@ -1199,30 +1220,87 @@ with tab_dash:
                               f'style="color:#9aa0aa;margin-bottom:6px;">Revenue at risk - '
                               f'trend</div><img src="data:image/png;base64,'
                               f'{spark_b64(history)}" style="width:230px;"/></div>')
+            bands = (scored["risk_band"].value_counts()
+                     if "risk_band" in scored.columns else pd.Series(dtype=int))
+            hi_crit = int(bands.get("High", 0) + bands.get("Critical", 0))
+
+            # ---- KPI strip: deterministic facts, never LLM text
+            def hero_tile(label, value, sub="", warn=False):
+                line = "rgba(240,179,95,.45)" if warn else "rgba(255,255,255,.14)"
+                sub_c = "#f0b35f" if warn else "#9aa0aa"
+                sub_html = (f'<div style="font-size:10.5px;color:{sub_c};'
+                            f'margin-top:2px;">{sub}</div>' if sub else "")
+                return (f'<div style="background:rgba(255,255,255,.05);border:1px '
+                        f'solid {line};border-radius:11px;padding:10px 14px;'
+                        f'flex:1;min-width:118px;">'
+                        f'<div class="cl-kicker" style="color:#9aa0aa;">{label}</div>'
+                        f'<div style="font-family:\'Space Grotesk\',sans-serif;'
+                        f'font-size:19px;font-weight:600;color:#fff;margin-top:3px;">'
+                        f'{value}</div>{sub_html}</div>')
+
+            tiles = [hero_tile("Customers", f"{n_cust:,}", "scored this run")]
+            run_mode = (reports.get("mode_decision") or {}).get("mode", "")
+            if run_mode:
+                tiles.append(hero_tile("Mode", run_mode.upper(),
+                                       "fresh models" if run_mode == "train"
+                                       else "reused models"))
+            lens_a = (training.get("lenses") or {}).get("A") or {}
+            if lens_a.get("test_roc_auc") is not None:
+                auc = float(lens_a["test_roc_auc"])
+                tiles.append(hero_tile(
+                    "Model quality", f"{auc:.3f}",
+                    "suspiciously perfect - check for label leakage"
+                    if auc >= 0.99 else "test ROC-AUC", warn=auc >= 0.99))
+            lens_b = (training.get("lenses") or {}).get("B") or {}
+            if lens_b.get("c_index") is not None:
+                tiles.append(hero_tile("Survival", f"{float(lens_b['c_index']):.3f}",
+                                       "Cox C-index"))
+            if len(bands):
+                tiles.append(hero_tile("High / critical", f"{hi_crit:,}",
+                                       "customers to act on"))
+            drift_rep = reports.get("drift") or {}
+            if "alerts" in drift_rep:
+                n_alerts = len(drift_rep["alerts"])
+                tiles.append(hero_tile(
+                    "Drift", "stable" if not n_alerts else f"{n_alerts} alerts",
+                    "vs training baseline", warn=bool(n_alerts)))
+            kpi_html = ('<div style="display:flex;gap:10px;flex-wrap:wrap;'
+                        'margin-top:18px;">' + "".join(tiles) + "</div>")
+
+            # ---- narrative: escaped, numbers lifted into white
             narr_html = ""
             if narrative.get("summary"):
-                narr_html = (f'<p style="margin:14px 0 0;font-size:13px;color:#c3c7cf;'
-                             f'line-height:1.6;max-width:660px;">{narrative["summary"]}</p>')
+                safe = (str(narrative["summary"]).replace("&", "&amp;")
+                        .replace("<", "&lt;").replace(">", "&gt;"))
+                lit = re.sub(r"(\$?\d[\d,]*\.?\d*%?)",
+                             r'<b style="color:#fff;font-weight:600;">\1</b>', safe)
+                credit = narrative.get("engine", "")
+                narr_html = (
+                    f'<div style="margin:16px 0 0;padding:2px 0 2px 16px;'
+                    f'border-left:3px solid {BLUE};">'
+                    f'<p style="margin:0;font-size:13.5px;color:#c3c7cf;'
+                    f'line-height:1.7;text-align:justify;">{lit}</p>'
+                    + (f'<div class="cl-kicker" style="color:#6f7480;margin-top:8px;">'
+                       f'summary by {credit} - every figure audited against computed '
+                       f'facts</div>' if credit else "") + "</div>")
+
             headline = money(total_rar) if total_rar is not None else f"{n_cust:,}"
             headline_sub = "revenue at risk" if total_rar is not None else "customers scored"
             html(f'<div style="background:#1c1f26;color:#fff;border-radius:18px;'
                  f'padding:24px 28px;margin:10px 0 14px;">'
-                 f'<div style="display:flex;justify-content:space-between;gap:28px;'
-                 f'flex-wrap:wrap;align-items:flex-start;">'
-                 f'<div style="flex:1;min-width:340px;">'
                  f'<div class="cl-kicker" style="color:#9aa0aa;">Executive summary - '
-                 f'{source} - {n_cust:,} customers - run {created}</div>'
-                 f'<div style="display:flex;align-items:baseline;gap:14px;margin-top:12px;'
+                 f'{source} - run {created}</div>'
+                 f'<div style="display:flex;align-items:center;gap:14px;margin-top:12px;'
                  f'flex-wrap:wrap;">'
                  f'<span style="font-family:\'Space Grotesk\',sans-serif;font-size:46px;'
                  f'font-weight:700;letter-spacing:-.02em;line-height:1;color:#fff;">'
                  f'{headline}</span>'
                  f'<span style="font-size:14px;color:#c3c7cf;">{headline_sub}</span>'
-                 f'{delta_chip}</div>{narr_html}</div>{spark_html}</div></div>')
+                 f'{delta_chip}'
+                 f'<span style="margin-left:auto;">{spark_html}</span></div>'
+                 f'{kpi_html}{narr_html}</div>')
 
             # ---- lens cards + navigation
-            bands = scored["risk_band"].value_counts() if "risk_band" in scored.columns else pd.Series(dtype=int)
-            hi_crit = int(bands.get("High", 0) + bands.get("Critical", 0))
             jframe_all = snapshot_journeys(scored, None)
             timing_all = jn.churn_timing(jframe_all) if jframe_all is not None and jframe_all["churned"].any() else pd.Series(dtype=int)
             exit_peak = f"mo {int(timing_all.idxmax())}" if len(timing_all) else "-"
@@ -1880,10 +1958,19 @@ with tab_dash:
                              f"{worst_seg['segment']}</b>, the segment churning at "
                              f"{worst_seg['mean_churn_probability']:.0%} (D)")
             if parts:
-                play = ", ".join(parts[:-1]) + (", and " if len(parts) > 1 else "") + parts[-1]
+                step_rows = "".join(
+                    f'<div style="display:flex;gap:14px;align-items:baseline;'
+                    f'padding:9px 0;'
+                    + ("border-bottom:1px solid #d6e6f2;" if i < len(parts) - 1
+                       else "")
+                    + f'"><span class="cl-mono" style="font-size:12.5px;'
+                    f'font-weight:700;color:{BLUE};">0{i + 1}</span>'
+                    f'<span style="font-size:14px;line-height:1.6;color:{INK};">'
+                    f'{part[0].upper() + part[1:]}</span></div>'
+                    for i, part in enumerate(parts))
                 html(f'<div style="background:#eef5fb;border:1px solid #cfe2f0;'
-                     f'border-left:4px solid {BLUE};border-radius:14px;padding:18px 22px;'
-                     f'margin-top:14px;"><div class="cl-kicker" style="color:#0b5573;'
-                     f'margin-bottom:6px;">The recommended play - A to E in one line</div>'
-                     f'<p style="margin:0;font-size:14px;line-height:1.65;color:{INK};'
-                     f'max-width:960px;">{play[0].upper() + play[1:]}.</p></div>')
+                     f'border-left:4px solid {BLUE};border-radius:14px;'
+                     f'padding:16px 22px;margin-top:14px;">'
+                     f'<div class="cl-kicker" style="color:#0b5573;'
+                     f'margin-bottom:4px;">The recommended play - A to E</div>'
+                     f'{step_rows}</div>')

@@ -174,6 +174,11 @@ def narrate_run(manifest_data: dict, scored: pd.DataFrame | None = None,
     if use_llm and llm.ollama_available():
         try:
             text = _ollama_summary(facts)
+            # LLMs love typographic dashes and quotes - project style is ASCII
+            for bad, good in (("\u2014", " - "), ("\u2013", "-"),
+                              ("\u2018", "'"), ("\u2019", "'"),
+                              ("\u201c", '"'), ("\u201d", '"')):
+                text = text.replace(bad, good)
             violations = audit_numbers(text, facts)
             if not violations:
                 return {"summary": text, "engine": f"ollama:{llm.OLLAMA_MODEL}",

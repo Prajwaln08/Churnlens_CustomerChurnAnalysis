@@ -154,15 +154,12 @@ def _local_driver_strings(deltas: pd.DataFrame) -> list[str]:
 def _expected_remaining(out: pd.DataFrame, features: list[str],
                         dataset_id: str) -> pd.Series | None:
     try:
+        from ..training.auto_train import prepare_cox_covariates
+
         bundle = load_model("cox_bundle", dataset_id=dataset_id)
         covariates = [c for c in features if c != "tenure"]
-        frame = out[covariates].copy()
-        for col in frame.columns:
-            if pd.api.types.is_numeric_dtype(frame[col]):
-                frame[col] = frame[col].fillna(frame[col].median())
-            else:
-                frame[col] = frame[col].fillna("missing")
-        dummies = pd.get_dummies(frame, drop_first=True).astype(float)
+        dummies, _ = prepare_cox_covariates(
+            out[covariates], bundle.get("freq_maps") or {})
         dummies = dummies.reindex(columns=bundle["columns"], fill_value=0.0)
         expected_total = bundle["model"].predict_expectation(dummies)
         tenure = pd.to_numeric(out["tenure"], errors="coerce").fillna(0)

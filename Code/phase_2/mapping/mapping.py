@@ -278,12 +278,17 @@ def apply_mapping(df: pd.DataFrame, proposal: dict,
     renames: dict[str, str] = {}
     claimed: set[str] = set()
     skipped_collisions = []
+    existing = set(df.columns)
     for m in candidates:
-        if m["target"] in claimed:
-            skipped_collisions.append(m["source"])
+        tgt, src_col = m["target"], m["source"]
+        # a target may already exist as a raw column of THIS frame (a newer
+        # export shipping canonical names) - renaming onto it would create
+        # duplicate columns and break every operation downstream
+        if tgt in claimed or (tgt in existing and tgt != src_col):
+            skipped_collisions.append(src_col)
             continue
-        renames[m["source"]] = m["target"]
-        claimed.add(m["target"])
+        renames[src_col] = tgt
+        claimed.add(tgt)
 
     out = df.rename(columns=renames).copy()
     translated: dict[str, int] = {}

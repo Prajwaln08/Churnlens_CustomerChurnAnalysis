@@ -139,28 +139,55 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
     return report
 
 
+MAX_COX_LEVELS = 20      # categoricals beyond this become one frequency column
+MAX_COX_ROWS = 50_000    # Cox fit sample cap - ample statistically, safe in RAM
+
+
+def prepare_cox_covariates(frame: pd.DataFrame,
+                           freq_maps: dict | None = None
+                           ) -> tuple[pd.DataFrame, dict]:
+    """Impute + encode Cox covariates without column explosions. A categorical
+    beyond MAX_COX_LEVELS becomes its level frequency (one numeric column)
+    instead of thousands of dummies - the raw get_dummies path is what killed
+    training on wide real-world files. The maps are saved with the bundle so
+    scoring replays the training encoding exactly."""
+    out = frame.copy()
+    fitting = freq_maps is None
+    maps = {} if fitting else dict(freq_maps)
+    for col in out.columns:
+        if pd.api.types.is_numeric_dtype(out[col]):
+            out[col] = out[col].fillna(out[col].median())
+        else:
+            out[col] = out[col].fillna("missing").astype(str)
+            if col in maps:
+                out[col] = out[col].map(maps[col]).fillna(0.0)
+            elif out[col].nunique() > MAX_COX_LEVELS:
+                m = out[col].value_counts(normalize=True).to_dict()
+                if fitting:
+                    maps[col] = m
+                out[col] = out[col].map(m).fillna(0.0)
+    return pd.get_dummies(out, drop_first=True).astype(float), maps
+
+
 def _train_survival(data: pd.DataFrame, features: list[str], y: pd.Series,
                     dataset_id: str) -> dict:
     from lifelines import CoxPHFitter
 
     covariates = [c for c in features if c != "tenure"]
-    covar_frame = data[covariates].copy()
-    for col in covar_frame.columns:      # Cox cannot see NaNs - impute simply
-        if pd.api.types.is_numeric_dtype(covar_frame[col]):
-            covar_frame[col] = covar_frame[col].fillna(covar_frame[col].median())
-        else:
-            covar_frame[col] = covar_frame[col].fillna("missing")
-    frame = pd.get_dummies(covar_frame, drop_first=True).astype(float)
+    frame, freq_maps = prepare_cox_covariates(data[covariates])
     frame["tenure"] = pd.to_numeric(data["tenure"], errors="coerce").clip(lower=0.5)
     frame["Churn"] = y.values
     frame = frame.dropna(subset=["tenure"])
+    if len(frame) > MAX_COX_ROWS:      # the fit is O(rows x cols^2) in RAM
+        frame = frame.sample(MAX_COX_ROWS, random_state=42)
     try:
         cox = CoxPHFitter(penalizer=0.1).fit(frame, duration_col="tenure",
                                              event_col="Churn")
         c_index = float(cox.concordance_index_)
         if c_index >= GATE_C_INDEX:
             cols = [c for c in frame.columns if c not in ("tenure", "Churn")]
-            save_model({"model": cox, "columns": cols}, "cox_bundle",
+            save_model({"model": cox, "columns": cols,
+                        "freq_maps": freq_maps}, "cox_bundle",
                        dataset_id=dataset_id)
             return {"status": "promoted", "c_index": round(c_index, 4),
                     "reason": f"C-index {c_index:.3f} >= gate {GATE_C_INDEX}"}

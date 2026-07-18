@@ -135,12 +135,14 @@ class RunManifest:
             entry["elapsed_s"] = round(time.time() - t0, 3)
             entry["error"] = f"{type(exc).__name__}: {exc}"
             self.finish(RUN_FAILED)
+            self._notify(name, entry)
             raise
         else:
             entry["elapsed_s"] = round(time.time() - t0, 3)
             if entry["status"] == RUNNING:      # pause()/skip() may have changed it
                 entry["status"] = DONE
             self.save()
+            self._notify(name, entry)
 
     def record(self, stage: str, **fields) -> None:
         """Attach facts to a stage (rows_in/rows_out/artifacts/anything)."""
@@ -165,6 +167,18 @@ class RunManifest:
         entry = self._stage(stage)
         entry["status"] = SKIPPED
         entry["notes"].append(f"skipped: {reason}")
+        self._notify(stage, entry)
+
+    def _notify(self, name: str, entry: dict) -> None:
+        """Live-progress hook: callers may set `on_stage` (a callable taking
+        (stage_name, entry)) on the manifest to stream stage completions to a
+        UI. Display must never break a run, so errors are swallowed."""
+        cb = getattr(self, "on_stage", None)
+        if cb is not None:
+            try:
+                cb(name, entry)
+            except Exception:
+                pass
 
     def pause(self, stage: str, reason: str) -> None:
         """Level 0 confirmation gate: run stops here, resumable later."""

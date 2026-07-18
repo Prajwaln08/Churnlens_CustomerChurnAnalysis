@@ -65,12 +65,15 @@ def run_pipeline(
     proposal_override: dict | None = None,
     force_train: bool = False,
     raise_on_error: bool = False,
+    progress=None,
 ) -> RunManifest:
     """Run one dataset through the stage chain. Always returns the manifest -
     on failure its status is 'failed' with the error recorded (set
     raise_on_error=True to also propagate, e.g. in tests)."""
     registry = registry or Registry()
     m = RunManifest(source_name, autonomy_level=autonomy_level)
+    if progress is not None:
+        m.on_stage = progress    # stream stage completions to the caller
     try:
         _run(df, m, registry, autonomy_level, min_confidence,
              use_llm, proposal_override, force_train)

@@ -4,6 +4,7 @@ All offline: Ollama mocked away, artifacts absent (score stage must SKIP,
 not fail). The live end-to-end with real artifacts + real Ollama is a demo,
 not a unit test.
 """
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -194,3 +195,33 @@ def test_force_train_ignores_existing_artifacts(labeled_frame, registry):
     assert m3.data["stages"]["train"]["status"] == rm.DONE
     assert any("fresh training requested" in r
                for r in m3.data["reports"]["mode_decision"]["reasons"])
+
+
+def test_progress_callback_streams_stages(labeled_frame, registry):
+    """The UI hook: every finished stage is reported live, in order."""
+    seen = []
+    run_pipeline(labeled_frame, "streaming", autonomy_level=1, registry=registry,
+                 raise_on_error=True,
+                 progress=lambda name, entry: seen.append((name, entry["status"])))
+    names = [n for n, _ in seen]
+    assert names[:3] == ["ingest", "profile", "map"]
+    assert "persist" in names
+    assert all(s in ("done", "skipped") for _, s in seen)
+
+
+def test_leakage_screen_catches_post_outcome_columns(labeled_frame, registry):
+    """Regression (AUC=1.0 bug): a column filled only for churners, a
+    churn-named column, and an exact duplicate must all be screened out."""
+    frame = labeled_frame.copy()
+    churned = frame["Churn"].astype(str).isin(("1", "Yes", "True", "yes"))
+    frame["churn_month_recorded"] = np.where(churned, 5.0, np.nan)
+    frame["spend_copy"] = frame["spend"] * 2 + 1
+    m = run_pipeline(frame, "leak-check", autonomy_level=1,
+                     registry=registry, raise_on_error=True)
+    dropped = m.data["reports"]["training"]["leakage"]["dropped"]
+    kept = m.data["reports"]["training"]["leakage"]["kept"]
+    assert "churn_month_recorded" in dropped        # name AND missingness leak
+    assert "spend_copy" in dropped or "spend" in dropped   # duplicate pruned
+    assert not ("spend_copy" in kept and "spend" in kept)
+    auc = m.data["reports"]["training"]["lenses"]["A"]["test_roc_auc"]
+    assert auc < 0.999

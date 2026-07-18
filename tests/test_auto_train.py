@@ -1,5 +1,6 @@
 """Tests for Code/phase_2/training/auto_train.py - gates over vibes."""
 import numpy as np
+import pandas as pd
 import pytest
 
 from phase_1 import config
@@ -87,3 +88,27 @@ def test_score_with_dataset_model_roundtrip(labeled_frame):
     with pytest.raises(ValueError, match="needs columns"):
         auto_train.score_with_dataset_model(
             labeled_frame.drop(columns=["tenure"]), "credit-union")
+
+
+def test_cox_survives_high_cardinality_columns():
+    """Regression: a wide categorical (e.g. city, provider) must become one
+    frequency column, never thousands of dummies - raw get_dummies in the Cox
+    path is what OOM-killed training on real files."""
+    rng = np.random.default_rng(11)
+    n = 600
+    charges = rng.uniform(20, 120, n).round(2)
+    risk = (charges - 20) / 100                       # high bill = high hazard
+    frame = pd.DataFrame({
+        "tenure": (1 + rng.exponential(40 * (1.05 - risk))).astype(int),
+        "MonthlyCharges": charges,
+        "city": [f"city_{i}" for i in rng.integers(0, 400, n)],
+        "plan": rng.choice(["basic", "plus", "max"], n),
+    })
+    frame["Churn"] = pd.Series(rng.random(n) < 0.35 + 0.55 * risk).map(
+        {True: "Yes", False: "No"})
+    report = auto_train.train_for_dataset(frame, "high-card-cox")
+    assert report["lenses"]["B"]["status"] in ("promoted", "trained_not_promoted")
+    from phase_1.modeling import load_model
+    bundle = load_model("cox_bundle", dataset_id="high-card-cox")
+    assert "city" in bundle["freq_maps"]              # frequency-encoded
+    assert len(bundle["columns"]) < 30                # no dummy explosion

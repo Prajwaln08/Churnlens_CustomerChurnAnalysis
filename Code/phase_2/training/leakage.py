@@ -52,8 +52,26 @@ def screen(df: pd.DataFrame, label_col: str) -> dict:
         elif _near_perfect_predictor(df[col], y):
             dropped[col] = (f"predicts the label at >{NEAR_PERFECT:.0%} alone - "
                             "an answer key, not a feature")
+        elif _missingness_mirrors_label(df[col], y):
+            dropped[col] = ("filled on only one side of the outcome - its "
+                            "missingness matches the label at "
+                            f">{NEAR_PERFECT:.0%} (post-outcome answer key)")
         else:
             features.append(col)
+
+    # perfect numeric duplicates: one copy carries all the information
+    numeric = [c for c in features if pd.api.types.is_numeric_dtype(df[c])]
+    if len(numeric) > 1:
+        corr = df[numeric].corr().abs()
+        for i, a in enumerate(numeric):
+            if a not in features:
+                continue
+            for b in numeric[i + 1:]:
+                if b in features and corr.loc[a, b] >= 0.999:
+                    features.remove(b)
+                    dropped[b] = (f"linear duplicate of '{a}' "
+                                  f"(|corr| {corr.loc[a, b]:.3f}) - one copy "
+                                  "is enough")
 
     return {"features": features, "derived": derived, "dropped": dropped}
 
@@ -72,6 +90,17 @@ def _numeric_label(series: pd.Series) -> pd.Series:
     if series.dtype == object:
         return series.map({"Yes": 1, "No": 0, "True": 1, "False": 0}).fillna(0).astype(float)
     return pd.to_numeric(series, errors="coerce").fillna(0).astype(float)
+
+
+def _missingness_mirrors_label(col: pd.Series, y: pd.Series) -> bool:
+    """A column filled only for churners (or only for stayers) is written
+    AFTER the outcome - its NaN pattern is the label. Imputers with missing
+    indicators would hand the model that answer key (the AUC=1.0 bug)."""
+    isna = col.isna()
+    if isna.sum() < 20 or (~isna).sum() < 20:
+        return False
+    match = float((isna.astype(float) == y).mean())
+    return max(match, 1 - match) >= NEAR_PERFECT
 
 
 def _near_perfect_predictor(col: pd.Series, y: pd.Series) -> bool:
