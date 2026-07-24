@@ -251,9 +251,14 @@ def propose_mapping(df: pd.DataFrame, use_llm: bool = True) -> dict:
         proposal = fuzzy_propose(profile)
 
     proposal["label_candidates"] = profiler.label_candidates(profile)
+    # the label is SUPPOSED to smell like churn: a source the proposal maps
+    # to the canonical label is the outcome itself, never a leak suspect
+    label_sources = {m["source"] for m in proposal["mappings"]
+                     if m.get("target") == "Churn"}
     proposal["quarantine"] = [
         {"source": c, "reason": "post-outcome suspect (name pattern)"}
-        for c, p in profile["columns"].items() if p["post_outcome_suspect"]
+        for c, p in profile["columns"].items()
+        if p["post_outcome_suspect"] and c not in label_sources
     ]
     proposal["profile"] = profile
     return proposal

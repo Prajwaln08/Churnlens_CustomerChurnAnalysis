@@ -10,3 +10,4 @@ gatherUsageStats = false
 [server]
 # test-portal upload budget - enforced at the browser, shown on every uploader
 maxUploadSize = 100
+fileWatcherType = "none"

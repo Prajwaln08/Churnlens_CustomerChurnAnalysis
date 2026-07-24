@@ -1,3 +1,15 @@
+---
+title: ChurnLens
+emoji: "🔎"
+colorFrom: blue
+colorTo: green
+sdk: streamlit
+sdk_version: "1.59.0"
+python_version: "3.11"
+app_file: app/streamlit_app.py
+pinned: false
+---
+
 # ChurnLens - Customer Churn Analytics Suite
 
 One tool, five questions about every customer base: **who** will leave, **when**,

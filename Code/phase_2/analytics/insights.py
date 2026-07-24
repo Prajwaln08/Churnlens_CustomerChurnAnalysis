@@ -123,7 +123,8 @@ def enrich_and_summarize(scored: pd.DataFrame, dataset_id: str,
 
 def _numeric_label(series: pd.Series) -> pd.Series:
     if series.dtype == object:
-        return series.map({"Yes": 1, "No": 0}).fillna(0).astype(int)
+        s = series.astype(str).str.strip().str.lower()
+        return s.isin(("yes", "y", "true", "1", "churned")).astype(int)
     return pd.to_numeric(series, errors="coerce").fillna(0).astype(int)
 
 

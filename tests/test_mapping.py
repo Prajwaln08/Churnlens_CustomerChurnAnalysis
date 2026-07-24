@@ -138,3 +138,22 @@ def test_apply_mapping_when_target_already_in_frame():
     assert "churn_flag" in report["collisions_skipped"]
     assert "churn_flag" in mapped.columns          # kept as an extra, not lost
     assert report["renamed"] == {"months": "tenure"}
+
+
+def test_churn_named_label_is_not_quarantined():
+    """Regression (Spaces/no-LLM path): a label column literally named
+    'churned' must map to Churn and train - the post-outcome name screen
+    protects features, never the label itself."""
+    import numpy as np
+    rng = np.random.default_rng(3)
+    n = 200
+    frame = pd.DataFrame({
+        "customer_id": [f"c{i}" for i in range(n)],
+        "tenure_months": rng.integers(1, 60, n),
+        "monthly_charges": rng.uniform(20, 110, n).round(2),
+        "churned": rng.choice(["yes", "no"], n),
+    })
+    prop = mapping.propose_mapping(frame, use_llm=False)
+    assert "churned" not in {q["source"] for q in prop["quarantine"]}
+    mapped, report = mapping.apply_mapping(frame, prop)
+    assert "Churn" in mapped.columns

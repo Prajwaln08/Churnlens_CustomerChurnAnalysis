@@ -50,7 +50,8 @@ def _content_hash(df: pd.DataFrame) -> str:
 
 def _numeric_label(series: pd.Series) -> pd.Series:
     if series.dtype == object:
-        return series.map({"Yes": 1, "No": 0, "True": 1, "False": 0}).fillna(0)
+        s = series.astype(str).str.strip().str.lower()
+        return s.isin(("yes", "y", "true", "1", "churned")).astype(float)
     return pd.to_numeric(series, errors="coerce").fillna(0)
 
 

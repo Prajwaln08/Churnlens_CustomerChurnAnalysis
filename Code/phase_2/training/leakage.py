@@ -87,8 +87,10 @@ def derive_datetime_features(df: pd.DataFrame, derived: dict[str, str]) -> pd.Da
 
 
 def _numeric_label(series: pd.Series) -> pd.Series:
+    """Yes/no/true/1/churned in any casing -> 1.0; everything else -> 0.0."""
     if series.dtype == object:
-        return series.map({"Yes": 1, "No": 0, "True": 1, "False": 0}).fillna(0).astype(float)
+        s = series.astype(str).str.strip().str.lower()
+        return s.isin(("yes", "y", "true", "1", "churned")).astype(float)
     return pd.to_numeric(series, errors="coerce").fillna(0).astype(float)
 
 

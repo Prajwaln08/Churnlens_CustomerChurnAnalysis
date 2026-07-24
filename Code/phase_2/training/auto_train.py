@@ -61,6 +61,15 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
                           "numeric": numeric}
 
     # ------------------------------------------------------------ lens A
+    if y.nunique() < 2:
+        reason = ("label collapses to a single class after normalization - "
+                  "check the label column's values")
+        report["lenses"]["A"] = {"status": "skipped", "reason": reason}
+        report["lenses"]["B"] = {"status": "skipped", "reason": reason}
+        report["lenses"]["D"] = _train_kmeans_only(
+            X, numeric, categorical, high_card, dataset_id)
+        return report
+
     candidates = {
         "logistic_regression": LogisticRegression(
             max_iter=2000, class_weight="balanced", random_state=seed),
@@ -238,6 +247,13 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
                                  "reason": "no duration column (tenure) mapped"}
 
     # ------------------------------------------------------------ lens D
+    report["lenses"]["D"] = _train_kmeans_only(
+        X, numeric, categorical, high_card, dataset_id)
+
+    return report
+
+
+def _train_kmeans_only(X, numeric, categorical, high_card, dataset_id) -> dict:
     try:
         pre = make_preprocessor(numeric, categorical, high_card)
         scan = kmeans_scan(pre.fit_transform(X), ks=KMEANS_KS)
@@ -246,14 +262,11 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
             X, make_preprocessor(numeric, categorical, high_card), k)
         save_model({"pipeline": km, "features": list(X.columns), "k": k},
                    "kmeans", dataset_id=dataset_id)
-        report["lenses"]["D"] = {
-            "status": "promoted", "k": k,
-            "silhouette": round(float(scan["silhouette"].max()), 3),
-            "reason": f"k={k} at silhouette peak"}
+        return {"status": "promoted", "k": k,
+                "silhouette": round(float(scan["silhouette"].max()), 3),
+                "reason": f"k={k} at silhouette peak"}
     except Exception as exc:
-        report["lenses"]["D"] = {"status": "failed", "reason": str(exc)}
-
-    return report
+        return {"status": "failed", "reason": str(exc)}
 
 
 MAX_COX_LEVELS = 20      # categoricals beyond this become one frequency column

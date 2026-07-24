@@ -233,3 +233,34 @@ def test_campaign_uplift_persists_and_reuses():
     renamed = frame.rename(columns={"engagement": "eng2"})
     s3, r3 = auto_train.score_campaign_with_saved(renamed, "camp-src")
     assert s3 is None and r3 is None
+
+
+def test_lowercase_labels_train_fine():
+    """Regression (visitor path): 'yes'/'no' labels in any casing must train,
+    not collapse to a single class."""
+    rng = np.random.default_rng(17)
+    n = 500
+    tenure = rng.integers(1, 60, n)
+    frame = pd.DataFrame({
+        "tenure": tenure,
+        "MonthlyCharges": rng.uniform(20, 110, n).round(2),
+        "Churn": np.where((tenure < 15) & (rng.random(n) < 0.8), "yes", "no"),
+    })
+    report = auto_train.train_for_dataset(frame, "lowercase-check")
+    assert report["lenses"]["A"]["status"] == "promoted"
+
+
+def test_single_class_label_degrades_honestly():
+    """A label with one value skips A and B with a reason - D still trains."""
+    rng = np.random.default_rng(18)
+    n = 300
+    frame = pd.DataFrame({
+        "tenure": rng.integers(1, 60, n),
+        "MonthlyCharges": rng.uniform(20, 110, n).round(2),
+        "plan": rng.choice(["a", "b"], n),
+        "Churn": ["no"] * n,
+    })
+    report = auto_train.train_for_dataset(frame, "oneclass-check")
+    assert report["lenses"]["A"]["status"] == "skipped"
+    assert "single class" in report["lenses"]["A"]["reason"]
+    assert report["lenses"]["D"]["status"] == "promoted"
