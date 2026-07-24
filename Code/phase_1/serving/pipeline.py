@@ -171,7 +171,17 @@ def _coerce_telco(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def risk_band(p: float) -> str:
+def risk_band(p: float, threshold: float | None = None) -> str:
+    """Fixed cutoffs by default; given a cost-optimal decision threshold t,
+    bands pivot around it: Low < t/2, Medium < t, High < t + (1-t)/2."""
+    if threshold is not None:
+        if p < threshold / 2:
+            return "Low"
+        if p < threshold:
+            return "Medium"
+        if p < threshold + (1 - threshold) / 2:
+            return "High"
+        return "Critical"
     for cutoff, band in RISK_BANDS:
         if p < cutoff:
             return band

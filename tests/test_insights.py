@@ -64,3 +64,13 @@ def test_unlabeled_scoring_still_gets_drivers(trained_scored):
     assert population["global_drivers"]
     assert "lift_by_decile" not in population
     assert "actual_churn_rate" not in population
+
+
+def test_revenue_at_risk_ships_a_confidence_interval(trained_scored):
+    """Phase 1.3: the RaR headline carries a bootstrap 95% CI around it."""
+    df, scored = trained_scored
+    _, population = enrich_and_summarize(scored, "insight-source")
+    rar = population["revenue_at_risk"]
+    lo, hi = rar["total_ci95"]
+    assert lo < hi
+    assert lo <= rar["total"] <= hi

@@ -1313,10 +1313,16 @@ with tab_dash:
             lens_a = (training.get("lenses") or {}).get("A") or {}
             if lens_a.get("test_roc_auc") is not None:
                 auc = float(lens_a["test_roc_auc"])
+                sub_a = "test ROC-AUC"
+                if lens_a.get("auc_ci95"):
+                    lo_ci, hi_ci = lens_a["auc_ci95"]
+                    sub_a += f" [{lo_ci:.2f} - {hi_ci:.2f}]"
+                if lens_a.get("brier") is not None:
+                    sub_a += f" - Brier {lens_a['brier']:.3f} (calibrated)"
                 tiles.append(hero_tile(
                     "Model quality", f"{auc:.3f}",
                     "suspiciously perfect - check for label leakage"
-                    if auc >= 0.99 else "test ROC-AUC", warn=auc >= 0.99))
+                    if auc >= 0.99 else sub_a, warn=auc >= 0.99))
             lens_b = (training.get("lenses") or {}).get("B") or {}
             if lens_b.get("c_index") is not None:
                 tiles.append(hero_tile("Survival", f"{float(lens_b['c_index']):.3f}",
@@ -1352,6 +1358,10 @@ with tab_dash:
 
             headline = money(total_rar) if total_rar is not None else f"{n_cust:,}"
             headline_sub = "revenue at risk" if total_rar is not None else "customers scored"
+            rar_ci = (analytics.get("revenue_at_risk") or {}).get("total_ci95")
+            if total_rar is not None and rar_ci:
+                headline_sub += (f" - 95% CI {money(rar_ci[0])} to "
+                                 f"{money(rar_ci[1])}")
             html(f'<div style="background:#1c1f26;color:#fff;border-radius:18px;'
                  f'padding:24px 28px;margin:10px 0 14px;">'
                  f'<div class="cl-kicker" style="color:#9aa0aa;">Executive summary - '
@@ -1444,6 +1454,41 @@ with tab_dash:
                                       f"always the highest-stakes one.")
                         rec_action(f"Contact the {crit:,} Critical-band customers "
                                    "first, ordered by revenue at risk.", impact)
+                    cost_rep = lens_a.get("cost")
+                    if cost_rep:
+                        with st.expander("Cost assumptions - decision threshold"):
+                            html(f'<div style="font-size:12.5px;color:{MUTED};'
+                                 f'margin-bottom:8px;">Bands pivot on a '
+                                 f'cost-optimal threshold of '
+                                 f'<b>{cost_rep["decision_threshold"]:.2f}</b> '
+                                 f'({cost_rep["cost_assumption"]}), chosen on the '
+                                 'held-out slice - not the 0.5 default. Change '
+                                 'the costs to see where the cut should sit for '
+                                 'this business.</div>')
+                            cc1, cc2 = st.columns(2)
+                            c_fn = cc1.number_input("Cost of missing a churner",
+                                                    1, 100, 5, key="cost_fn_a")
+                            c_fp = cc2.number_input("Cost of one retention offer",
+                                                    1, 100, 1, key="cost_fp_a")
+                            curve_c = cost_rep["cost_curve"]
+                            t_star = min(curve_c, key=lambda c: c["fn"] * c_fn
+                                         + c["fp"] * c_fp)["t"]
+                            if abs(t_star - cost_rep["decision_threshold"]) < 1e-9:
+                                st.caption(f"With these costs the trained "
+                                           f"threshold {t_star:.2f} is already "
+                                           "optimal - the bands above reflect it.")
+                            else:
+                                bands_new = (scored["churn_probability"].apply(
+                                    pipeline.risk_band, threshold=t_star)
+                                    .value_counts())
+                                order_b = ["Low", "Medium", "High", "Critical"]
+                                summary_b = " - ".join(
+                                    f"{b}: {int(bands_new.get(b, 0)):,}"
+                                    for b in order_b)
+                                st.caption(f"With these costs the optimal "
+                                           f"threshold moves to {t_star:.2f}; "
+                                           f"bands would become {summary_b}. "
+                                           "Retrain (or rescore) to adopt it.")
                     mean_p = float(scored["churn_probability"].mean())
                     tiles = [tile("High + Critical", f"{hi_crit:,}", accent=RED),
                              tile("Mean churn probability", f"{mean_p:.0%}", accent=BLUE)]

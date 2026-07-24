@@ -112,3 +112,96 @@ def test_cox_survives_high_cardinality_columns():
     bundle = load_model("cox_bundle", dataset_id="high-card-cox")
     assert "city" in bundle["freq_maps"]              # frequency-encoded
     assert len(bundle["columns"]) < 30                # no dummy explosion
+
+
+def test_lens_a_probabilities_are_calibrated():
+    """Phase 1.1: served probabilities are calibrated - '80%' means 80%.
+    Brier and a bin table land in the report, computed on the holdout only."""
+    rng = np.random.default_rng(5)
+    n = 1600
+    x1 = rng.normal(0, 1, n)
+    x2 = rng.normal(0, 1, n)
+    p_true = 1 / (1 + np.exp(-(0.9 * x1 - 0.7 * x2)))
+    frame = pd.DataFrame({
+        "tenure": rng.integers(1, 60, n),
+        "MonthlyCharges": (50 + 10 * x1).round(2),
+        "signal_b": x2.round(3),
+        "Churn": np.where(rng.random(n) < p_true, "Yes", "No"),
+    })
+    report = auto_train.train_for_dataset(frame, "calib-check")
+    a = report["lenses"]["A"]
+    assert a["calibration_method"] in ("sigmoid", "isotonic")
+    assert 0 < a["brier"] < 0.3
+    bins = [b for b in a["calibration_bins"] if b["n"] >= 30]
+    assert bins, "expected populated calibration bins"
+    mean_gap = sum(abs(b["predicted"] - b["observed"]) for b in bins) / len(bins)
+    assert mean_gap < 0.15, f"calibration gap too wide: {mean_gap:.3f}"
+
+
+def test_temporal_holdout_used_when_dates_exist():
+    """Phase 1.2: with a datetime column, lens A trains on the past and tests
+    on the most recent 20% - and says so. Without dates, the stratified
+    random split remains."""
+    rng = np.random.default_rng(9)
+    n = 900
+    start = pd.Timestamp("2025-01-01")
+    signup = pd.to_datetime(start) + pd.to_timedelta(
+        rng.integers(0, 540, n), unit="D")
+    drift_p = 0.15 + 0.5 * (signup - start).days / 540      # churn grows over time
+    frame = pd.DataFrame({
+        "signup_date": signup,
+        "tenure": rng.integers(1, 60, n),
+        "MonthlyCharges": rng.uniform(20, 120, n).round(2),
+        "plan": rng.choice(["a", "b", "c"], n),
+        "Churn": np.where(rng.random(n) < drift_p, "Yes", "No"),
+    })
+    report = auto_train.train_for_dataset(frame, "temporal-check")
+    a = report["lenses"]["A"]
+    assert a["evaluation"].startswith("temporal holdout")
+    assert "signup_date" in a["evaluation"]
+
+    no_dates = frame.drop(columns=["signup_date"])
+    report2 = auto_train.train_for_dataset(no_dates, "temporal-check-2")
+    assert report2["lenses"]["A"]["evaluation"] == \
+        "single stratified holdout (80/20)"
+
+
+def test_auc_confidence_interval_brackets_the_point(labeled_frame):
+    """Phase 1.3: the held-out AUC ships with a 95% bootstrap CI."""
+    report = auto_train.train_for_dataset(labeled_frame, "ci-check")
+    a = report["lenses"]["A"]
+    lo, hi = a["auc_ci95"]
+    assert lo < hi
+    assert lo <= a["test_roc_auc"] <= hi
+
+
+def test_cost_threshold_reported_and_used_for_bands(labeled_frame):
+    """Phase 1.4: training picks a cost-optimal threshold, ships it in the
+    bundle, and scoring bands pivot on it. Raising the miss cost never raises
+    the threshold."""
+    report = auto_train.train_for_dataset(labeled_frame, "cost-check")
+    cost = report["lenses"]["A"]["cost"]
+    curve = cost["cost_curve"]
+    assert 0.05 <= cost["decision_threshold"] <= 0.95
+    t_cheap = min(curve, key=lambda c: c["fn"] * 1 + c["fp"] * 1)["t"]
+    t_dear = min(curve, key=lambda c: c["fn"] * 20 + c["fp"] * 1)["t"]
+    assert t_dear <= t_cheap
+
+    from phase_1.modeling import load_model
+    bundle = load_model("churn_pipeline", dataset_id="cost-check")
+    assert bundle["threshold"] == cost["decision_threshold"]
+
+    scored = auto_train.score_with_dataset_model(labeled_frame, "cost-check")
+    t = bundle["threshold"]
+    just_below = scored[scored["churn_probability"] < t / 2]
+    if len(just_below):
+        assert (just_below["risk_band"] == "Low").all()
+
+
+def test_served_artifact_refits_on_full_data(labeled_frame):
+    """Phase 4.4: metrics come from the holdout, the served artifact from a
+    refit on 100% of rows - and the report states it."""
+    report = auto_train.train_for_dataset(labeled_frame, "refit-check")
+    assert report["lenses"]["A"]["refit_on_full"] is True
+    scored = auto_train.score_with_dataset_model(labeled_frame, "refit-check")
+    assert scored["churn_probability"].between(0, 1).all()

@@ -11,10 +11,13 @@ and scoring stays off rather than pretending.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
+from sklearn.base import clone
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import brier_score_loss, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
@@ -65,6 +68,9 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
             class_weight="balanced", random_state=seed),
     }
     best_name, best_auc, best_pipe, cv_std = None, 0.0, None, None
+    brier, calibration_bins, cal_method, auc_ci = None, None, None, None
+    threshold, cost_report = None, None
+    refit_on_full = False
     if cv_folds:
         from sklearn.model_selection import StratifiedKFold, cross_val_score
 
@@ -78,12 +84,45 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
             if scores.mean() > best_auc:
                 best_name, best_auc = name, float(scores.mean())
                 cv_std, best_pipe = float(scores.std()), pipe
-        best_pipe.fit(X, y)                     # winner refits on all rows
+        cal_method = "isotonic" if len(X) >= 10_000 else "sigmoid"
+        try:                                    # winner refits on all rows,
+            best_pipe = CalibratedClassifierCV(  # probability-calibrated
+                Pipeline([("prep", make_preprocessor(numeric, categorical,
+                                                     high_card)),
+                          ("clf", clone(candidates[best_name]))]),
+                method=cal_method, cv=cv_folds).fit(X, y)
+        except Exception as exc:
+            cal_method = f"skipped ({type(exc).__name__})"
+            best_pipe.fit(X, y)
         evaluation = f"{cv_folds}-fold stratified cv"
+        refit_on_full = True
     else:
-        stratify = y if y.nunique() == 2 and y.value_counts().min() >= 2 else None
-        X_tr, X_te, y_tr, y_te = train_test_split(
-            X, y, test_size=0.2, stratify=stratify, random_state=seed)
+        # deployment-honest split: when the data carries a date, train on the
+        # past and test on the most recent 20% - random splits flatter churn
+        # models because tomorrow is never a shuffle of yesterday
+        temporal_col = None
+        date_cols = [c for c in screened["derived"] if c in X.columns]
+        if date_cols:
+            cand = min(date_cols, key=lambda c: X[c].isna().mean())
+            if X[cand].isna().mean() <= 0.5:
+                temporal_col = cand
+        X_tr = None
+        if temporal_col is not None:
+            order = (X[temporal_col].fillna(X[temporal_col].median())
+                     .sort_values(ascending=False).index)   # oldest first
+            cut = int(len(order) * 0.8)
+            tr_ix, te_ix = order[:cut], order[cut:]
+            if y.loc[tr_ix].nunique() == 2 and y.loc[te_ix].nunique() == 2:
+                X_tr, X_te = X.loc[tr_ix], X.loc[te_ix]
+                y_tr, y_te = y.loc[tr_ix], y.loc[te_ix]
+                evaluation = (f"temporal holdout - most recent 20% by "
+                              f"'{temporal_col[:-5]}'")
+        if X_tr is None:
+            stratify = (y if y.nunique() == 2
+                        and y.value_counts().min() >= 2 else None)
+            X_tr, X_te, y_tr, y_te = train_test_split(
+                X, y, test_size=0.2, stratify=stratify, random_state=seed)
+            evaluation = "single stratified holdout (80/20)"
         for name, est in candidates.items():
             pipe = Pipeline([("prep", make_preprocessor(numeric, categorical,
                                                         high_card)),
@@ -91,11 +130,83 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
             auc = roc_auc_score(y_te, pipe.predict_proba(X_te)[:, 1])
             if auc > best_auc:
                 best_name, best_auc, best_pipe = name, auc, pipe
-        evaluation = "single stratified holdout (80/20)"
+        # calibration: '80% probability' should mean 80% - fit the calibrator
+        # on training data only, judge it on the untouched holdout
+        cal_method = "isotonic" if len(X_tr) >= 10_000 else "sigmoid"
+        try:
+            calib = CalibratedClassifierCV(
+                Pipeline([("prep", make_preprocessor(numeric, categorical,
+                                                     high_card)),
+                          ("clf", clone(candidates[best_name]))]),
+                method=cal_method, cv=3).fit(X_tr, y_tr)
+            p_te = calib.predict_proba(X_te)[:, 1]
+            best_pipe = calib
+            best_auc = float(roc_auc_score(y_te, p_te))
+            brier = round(float(brier_score_loss(y_te, p_te)), 4)
+            y_arr = y_te.to_numpy()
+            bin_ix = np.clip((p_te * 10).astype(int), 0, 9)
+            calibration_bins = [
+                {"bin": f"{b_ / 10:.1f}-{(b_ + 1) / 10:.1f}",
+                 "predicted": round(float(p_te[bin_ix == b_].mean()), 3),
+                 "observed": round(float(y_arr[bin_ix == b_].mean()), 3),
+                 "n": int((bin_ix == b_).sum())}
+                for b_ in range(10) if (bin_ix == b_).any()]
+        except Exception as exc:
+            cal_method = f"skipped ({type(exc).__name__})"
+        # 95% bootstrap CI: a point AUC on a small holdout deserves error bars
+        try:
+            probs_te = best_pipe.predict_proba(X_te)[:, 1]
+            y_arr_ci = y_te.to_numpy()
+            rng_ci = np.random.default_rng(seed)
+            boots = []
+            for _ in range(200):
+                ix = rng_ci.integers(0, len(y_arr_ci), len(y_arr_ci))
+                if y_arr_ci[ix].min() != y_arr_ci[ix].max():
+                    boots.append(roc_auc_score(y_arr_ci[ix], probs_te[ix]))
+            if len(boots) >= 50:
+                auc_ci = [round(float(np.percentile(boots, 2.5)), 4),
+                          round(float(np.percentile(boots, 97.5)), 4)]
+        except Exception:
+            pass
+        # cost-based decision threshold: a missed churner is worth more than
+        # one retention offer, so 0.5 is rarely the right cut. The full
+        # FN/FP curve is reported so the UI can re-optimize for any costs.
+        try:
+            probs_th = best_pipe.predict_proba(X_te)[:, 1]
+            y_th = y_te.to_numpy()
+            curve = []
+            for t_ in [round(0.05 * i, 2) for i in range(1, 20)]:
+                pred = probs_th >= t_
+                curve.append({"t": t_,
+                              "fn": int(((~pred) & (y_th == 1)).sum()),
+                              "fp": int((pred & (y_th == 0)).sum())})
+            cost_fn, cost_fp = 5, 1        # default: missed churner = 5x offer
+            threshold = min(curve,
+                            key=lambda c: c["fn"] * cost_fn + c["fp"] * cost_fp)["t"]
+            cost_report = {"decision_threshold": threshold,
+                           "cost_assumption": "missed churner = 5x offer cost",
+                           "cost_curve": curve}
+        except Exception:
+            threshold, cost_report = None, None
+        # every metric above came from the untouched holdout; the SERVED
+        # artifact now refits on all rows so no training data is wasted
+        try:
+            final_cfg = Pipeline([("prep", make_preprocessor(
+                numeric, categorical, high_card)),
+                ("clf", clone(candidates[best_name]))])
+            if cal_method and not str(cal_method).startswith("skipped"):
+                best_pipe = CalibratedClassifierCV(
+                    final_cfg, method=cal_method, cv=3).fit(X, y)
+            else:
+                best_pipe = final_cfg.fit(X, y)
+            refit_on_full = True
+        except Exception:
+            pass                    # keep the holdout-fitted model, say so
     promoted = best_auc >= GATE_AUC
     if promoted:
         save_model({"pipeline": best_pipe, "features": list(X.columns),
                     "metrics": {"test_roc_auc": round(best_auc, 4)},
+                    "threshold": threshold,
                     "model": best_name}, "churn_pipeline", dataset_id=dataset_id)
         # drift baseline: the training data's distributions, for phase-6 checks
         from ..monitoring import drift as drift_mod
@@ -107,6 +218,12 @@ def train_for_dataset(df: pd.DataFrame, dataset_id: str,
         "model": best_name, "test_roc_auc": round(best_auc, 4),
         "evaluation": evaluation,
         **({"cv_std": round(cv_std, 4)} if cv_std is not None else {}),
+        **({"auc_ci95": auc_ci} if auc_ci else {}),
+        **({"cost": cost_report} if cost_report else {}),
+        "refit_on_full": refit_on_full,
+        **({"brier": brier} if brier is not None else {}),
+        **({"calibration_method": cal_method} if cal_method else {}),
+        **({"calibration_bins": calibration_bins} if calibration_bins else {}),
         "gate": GATE_AUC,
         "reason": (f"test ROC-AUC {best_auc:.3f} >= gate {GATE_AUC}" if promoted
                    else f"test ROC-AUC {best_auc:.3f} below gate {GATE_AUC} - "
@@ -293,5 +410,6 @@ def score_with_dataset_model(df: pd.DataFrame, dataset_id: str) -> pd.DataFrame:
         raise ValueError(f"dataset model needs columns: {missing}")
     proba = bundle["pipeline"].predict_proba(out[bundle["features"]])[:, 1]
     out["churn_probability"] = proba.round(4)
-    out["risk_band"] = [risk_band(p) for p in proba]
+    out["risk_band"] = [risk_band(p, threshold=bundle.get("threshold"))
+                        for p in proba]
     return out

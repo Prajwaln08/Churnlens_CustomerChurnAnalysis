@@ -101,8 +101,15 @@ def enrich_and_summarize(scored: pd.DataFrame, dataset_id: str,
         ranked = out["revenue_at_risk"].sort_values(ascending=False)
         total = float(ranked.sum())
         top_n = max(1, len(ranked) // 10)
+        rng_rar = np.random.default_rng(7)
+        vals = out["revenue_at_risk"].to_numpy()
+        sums = [float(vals[rng_rar.integers(0, len(vals), len(vals))].sum())
+                for _ in range(200)] if len(vals) else []
         population["revenue_at_risk"] = {
             "total": round(total, 2),
+            **({"total_ci95": [round(float(np.percentile(sums, 2.5)), 2),
+                               round(float(np.percentile(sums, 97.5)), 2)]}
+               if sums else {}),
             "top_decile_share": round(float(ranked.head(top_n).sum())
                                       / total, 3) if total else 0.0}
 
