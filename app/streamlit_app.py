@@ -28,6 +28,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "Code"))
 
 from phase_1 import bootstrap, pipeline  # noqa: E402
 from phase_2 import connectors, profiler  # noqa: E402
+from phase_2.analytics import fairness  # noqa: E402
 from phase_2.analytics import insights as ins  # noqa: E402
 from phase_2.analytics import journeys as jn  # noqa: E402
 from phase_2.mapping import CANONICAL  # noqa: E402
@@ -1198,6 +1199,12 @@ with tab_process:
             status_table(bundle["stage_frame"][["stage", "status", "elapsed_s",
                                                 "rows_out", "notes"]].fillna("-"))
             dark_ledger(bundle["ledger"])
+            _card_p = RunManifest.load(run_pick).run_dir / "model_card.md"
+            if _card_p.exists():
+                st.download_button("Download model card (markdown)",
+                                   _card_p.read_text(),
+                                   f"{run_pick}_model_card.md", "text/markdown",
+                                   key=f"card_{run_pick}")
             with st.expander("Actuals check - grade past predictions"):
                 html(f'<div style="font-size:12.5px;color:{MUTED};'
                      f'margin-bottom:8px;">Predictions are promises. When the '
@@ -1548,6 +1555,47 @@ with tab_dash:
                         else:
                             st.info("Cohort heatmap needs a churn label and a "
                                     "tenure column.")
+
+            with st.expander("Fairness audit - does the model score groups "
+                             "differently?"):
+                html(f'<div style="font-size:12.5px;color:{MUTED};'
+                     f'margin-bottom:8px;">Pick the columns that describe '
+                     'people rather than behavior (age band, gender, region, '
+                     'condition...). For each group: how the model scores '
+                     'them, and how often it flags them. A gap is a question '
+                     'for a human, not a verdict - correlation here is not '
+                     'causation.</div>')
+                sens_opts = [c for c in scored.columns
+                             if scored[c].dtype == object
+                             and 1 < scored[c].nunique() <= 12
+                             and c not in ("risk_band", "local_drivers",
+                                           "Churn")]
+                sens_pick = st.multiselect("Sensitive columns", sens_opts,
+                                           key="fairness_cols")
+                for sc_col in sens_pick:
+                    rep_f = fairness.audit_column(scored, sc_col)
+                    if not rep_f["groups"]:
+                        st.info(f"'{sc_col}': every group is under "
+                                f"{fairness.MIN_GROUP} customers - too small "
+                                "to report honestly.")
+                        continue
+                    html(f'<div style="font-size:13px;font-weight:700;'
+                         f'margin:10px 0 4px;">{sc_col}'
+                         + (f' <span class="cl-mono" style="font-size:11px;'
+                            f'color:#b3402a;">gap {rep_f["prob_gap"]:.0%} - '
+                            'worth a look</span>' if rep_f["flagged"] else
+                            f' <span class="cl-mono" style="font-size:11px;'
+                            f'color:{MUTED};">gap {rep_f["prob_gap"]:.0%}'
+                            '</span>')
+                         + '</div>')
+                    ftab = pd.DataFrame(rep_f["groups"]).rename(columns={
+                        "mean_probability": "mean churn prob",
+                        "high_or_critical_share": "high/critical share"})
+                    st.dataframe(ftab, width="stretch", hide_index=True)
+                if sens_pick:
+                    st.caption("Groups under 30 customers are never shown. "
+                               "TPR/FPR per group appear once realized "
+                               "outcomes are uploaded in 03 Process.")
 
             # ---- lens cards + navigation
             jframe_all = snapshot_journeys(scored, None)

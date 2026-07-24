@@ -74,3 +74,14 @@ def test_revenue_at_risk_ships_a_confidence_interval(trained_scored):
     lo, hi = rar["total_ci95"]
     assert lo < hi
     assert lo <= rar["total"] <= hi
+
+
+def test_driver_method_is_reported(trained_scored):
+    """Phase 3.1: the population report names how drivers were computed -
+    SHAP for HGB winners, counterfactual swap otherwise. Either way, every
+    customer gets local drivers."""
+    df, scored = trained_scored
+    enriched, population = enrich_and_summarize(scored, "insight-source")
+    assert population["driver_method"] in ("shap (tree)", "counterfactual swap")
+    assert enriched["local_drivers"].notna().all()
+    assert population["global_drivers"]

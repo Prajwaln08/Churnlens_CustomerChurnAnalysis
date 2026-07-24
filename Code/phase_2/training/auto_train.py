@@ -314,6 +314,55 @@ def _train_survival(data: pd.DataFrame, features: list[str], y: pd.Series,
         return {"status": "failed", "reason": str(exc)}
 
 
+def model_card(report: dict, dataset_id: str, rows: int,
+               created: str) -> str:
+    """A one-page markdown record of what was trained, on what, judged how -
+    the artifact's honest passport. Written next to the run so audits never
+    depend on anyone's memory."""
+    a = (report.get("lenses") or {}).get("A") or {}
+    lk = report.get("leakage") or {}
+    cost = a.get("cost") or {}
+    lines = [
+        f"# Model card - {dataset_id}",
+        "",
+        f"- Trained: {created}",
+        f"- Rows: {rows:,}",
+        f"- Winner: {a.get('model')} ({a.get('status')})",
+        f"- Evaluation: {a.get('evaluation')}",
+        f"- Test ROC-AUC: {a.get('test_roc_auc')}"
+        + (f" (95% CI {a['auc_ci95'][0]} - {a['auc_ci95'][1]})"
+           if a.get("auc_ci95") else ""),
+        f"- Calibration: {a.get('calibration_method')}"
+        + (f", Brier {a.get('brier')}" if a.get("brier") is not None else ""),
+        f"- Decision threshold: {cost.get('decision_threshold')}"
+        + (f" ({cost.get('cost_assumption')})"
+           if cost.get("cost_assumption") else ""),
+        f"- Refit on full data after evaluation: {a.get('refit_on_full')}",
+        f"- Serving gate: AUC >= {a.get('gate')}",
+        "",
+        f"## Features used ({len(lk.get('kept', []))})",
+        "",
+        ", ".join(lk.get("kept", [])) or "-",
+        "",
+        "## Columns excluded, with reasons",
+        "",
+    ]
+    for col, reason in (lk.get("dropped") or {}).items():
+        lines.append(f"- {col}: {reason}")
+    lines += ["", "## Other lenses", ""]
+    for lens in ("B", "D"):
+        info = (report.get("lenses") or {}).get(lens) or {}
+        if info:
+            lines.append(f"- Lens {lens}: {info.get('status')} - "
+                         f"{info.get('reason', '')}")
+    lines += ["",
+              "All scores are calibrated probabilities; figures above were "
+              "computed on held-out data before the final refit. Retrain "
+              "whenever realized outcomes fall below the serving gate "
+              "(03 Process - Actuals check).", ""]
+    return "\n".join(lines)
+
+
 def train_uplift_for_campaign(df: pd.DataFrame,
                               treatment_col: str = "treatment_group",
                               outcome_col: str = "conversion",

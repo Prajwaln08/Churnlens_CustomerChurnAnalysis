@@ -225,3 +225,18 @@ def test_leakage_screen_catches_post_outcome_columns(labeled_frame, registry):
     assert not ("spend_copy" in kept and "spend" in kept)
     auc = m.data["reports"]["training"]["lenses"]["A"]["test_roc_auc"]
     assert auc < 0.999
+
+
+def test_model_card_written_on_train(labeled_frame, registry):
+    """Phase 3.3: every training run leaves a model card next to its outputs
+    with the metrics, threshold, and exclusion reasons on record."""
+    m = run_pipeline(labeled_frame, "card-src", autonomy_level=1,
+                     registry=registry, raise_on_error=True)
+    card = m.run_dir / "model_card.md"
+    assert card.exists()
+    text = card.read_text()
+    assert "Model card - card-src" in text
+    assert "Test ROC-AUC" in text and "95% CI" in text
+    assert "Decision threshold" in text
+    assert "close_reason" in text          # exclusions with reasons
+    assert str(card) in m.data["stages"]["train"]["artifacts"]

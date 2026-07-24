@@ -47,7 +47,8 @@ def enrich_and_summarize(scored: pd.DataFrame, dataset_id: str,
         population["actual_churn_rate"] = round(float(y.mean()), 4)
 
     # ---------------------------------------------------------- drivers
-    base, deltas = _driver_deltas(pipe, out, features)
+    base, deltas, driver_method = _driver_deltas(pipe, out, features)
+    population["driver_method"] = driver_method
     global_importance = deltas.abs().mean().sort_values(ascending=False)
     population["global_drivers"] = [
         {"feature": f, "mean_abs_effect_pp": round(float(v) * 100, 2)}
@@ -127,10 +128,16 @@ def _numeric_label(series: pd.Series) -> pd.Series:
 
 
 def _driver_deltas(pipe, out: pd.DataFrame, features: list[str]):
-    """delta[i, f] = p(customer i) - p(customer i with feature f set to its
-    typical value). Positive = this feature's value pushes risk UP."""
+    """Per-customer signed attributions per ORIGINAL column, in probability
+    points. SHAP (exact, tree path) when the served model wraps HGB and the
+    frame is small enough to stay interactive; otherwise the counterfactual
+    median-swap. Returns (base_probs, deltas frame, method string)."""
     X = out[features]
     base = pipe.predict_proba(X)[:, 1]
+    if len(X) <= 50_000:
+        shap_deltas = _shap_deltas(pipe, X)
+        if shap_deltas is not None:
+            return base, shap_deltas, "shap (tree)"
     deltas = {}
     for f in features[:MAX_DRIVER_FEATURES]:
         counterfactual = X.copy()
@@ -141,7 +148,67 @@ def _driver_deltas(pipe, out: pd.DataFrame, features: list[str]):
             mode = col.mode(dropna=True)
             counterfactual[f] = mode.iloc[0] if len(mode) else col.iloc[0]
         deltas[f] = base - pipe.predict_proba(counterfactual)[:, 1]
-    return base, pd.DataFrame(deltas, index=out.index)
+    return base, pd.DataFrame(deltas, index=out.index), "counterfactual swap"
+
+
+def _match_original(encoded: str, columns) -> str | None:
+    """'plan_b' -> 'plan'; 'tenure' -> 'tenure'. Longest matching original."""
+    if encoded in columns:
+        return encoded
+    hits = [c for c in columns if encoded.startswith(f"{c}_")]
+    return max(hits, key=len) if hits else None
+
+
+def _shap_deltas(pipe, X: pd.DataFrame) -> pd.DataFrame | None:
+    """Exact tree-path SHAP for the underlying HGB, aggregated from encoded
+    features back to original columns and expressed as probability points
+    (sigmoid of the log-odds with and without each contribution). Returns
+    None whenever the artifact shape does not support it - the caller falls
+    back to counterfactuals, never fails."""
+    try:
+        import shap
+        from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.pipeline import Pipeline as SkPipeline
+
+        est = pipe
+        if isinstance(est, CalibratedClassifierCV):
+            est = est.calibrated_classifiers_[0].estimator
+        if not isinstance(est, SkPipeline):
+            return None
+        prep, clf = est.named_steps["prep"], est.named_steps["clf"]
+        if clf.__class__.__name__ != "HistGradientBoostingClassifier":
+            return None
+        Xt = prep.transform(X)
+        if hasattr(Xt, "toarray"):
+            Xt = Xt.toarray()
+        names = list(prep.get_feature_names_out())
+        explainer = shap.TreeExplainer(clf)
+        sv = explainer.shap_values(Xt)
+        if isinstance(sv, list):
+            sv = sv[-1]
+        if sv.ndim == 3:
+            sv = sv[:, :, -1]
+        groups: dict[str, list[int]] = {}
+        for j, name in enumerate(names):
+            orig = _match_original(name.split("__", 1)[-1], X.columns)
+            if orig:
+                groups.setdefault(orig, []).append(j)
+        if not groups:
+            return None
+        # each row's log-odds = explainer baseline + sum of contributions
+        expected = explainer.expected_value
+        if isinstance(expected, (list, np.ndarray)):
+            expected = np.asarray(expected).ravel()[-1]
+        row_logit = expected + sv.sum(axis=1)
+        p_full = 1 / (1 + np.exp(-row_logit))
+        deltas = {}
+        for orig, ix in groups.items():
+            contrib = sv[:, ix].sum(axis=1)
+            p_without = 1 / (1 + np.exp(-(row_logit - contrib)))
+            deltas[orig] = p_full - p_without
+        return pd.DataFrame(deltas, index=X.index)
+    except Exception:
+        return None
 
 
 def _local_driver_strings(deltas: pd.DataFrame) -> list[str]:

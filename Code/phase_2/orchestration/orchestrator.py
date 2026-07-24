@@ -219,6 +219,15 @@ def _run(df, m, registry, autonomy_level, min_confidence, use_llm, proposal_over
                 m.add_note("train", f"lens {lens}: {info['status']} - "
                                     f"{info['reason']}")
             m.record("train", rows_in=len(cleaned), rows_out=len(cleaned))
+            try:        # the artifact's passport, written next to the run
+                card = auto_train.model_card(
+                    train_report, dataset_id, len(cleaned),
+                    m.data.get("created_at", ""))
+                card_path = m.run_dir / "model_card.md"
+                card_path.write_text(card)
+                m.add_artifact("train", card_path)
+            except Exception:
+                pass
     else:
         m.skip("train", f"mode is {decision['mode']} - no training needed")
 
