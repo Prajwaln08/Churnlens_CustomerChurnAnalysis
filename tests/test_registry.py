@@ -85,3 +85,19 @@ def test_unconfirmed_mapping_is_not_reused(registry):
     registry.save_mapping("shop-data", proposal, confirmed=False,
                           created_at="2026-07-14T09:00:00Z")
     assert registry.latest_mapping("shop-data") is None     # nothing confirmed yet
+
+
+def test_outcomes_roundtrip(registry):
+    import pandas as pd
+    frame = pd.DataFrame({"customer_id": ["a", "b"], "predicted": [0.8, 0.2],
+                          "actual": [1, 0]})
+    n = registry.record_outcomes("run_x", frame)
+    assert n == 2
+    back = registry.outcomes_for("run_x")
+    assert len(back) == 2
+    assert set(back["customer_id"]) == {"a", "b"}
+    # upsert: re-recording overwrites, never duplicates
+    registry.record_outcomes("run_x", frame.assign(actual=[0, 1]))
+    back2 = registry.outcomes_for("run_x")
+    assert len(back2) == 2
+    assert set(back2["actual"]) == {0, 1}

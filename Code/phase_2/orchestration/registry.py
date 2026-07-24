@@ -48,6 +48,14 @@ CREATE TABLE IF NOT EXISTS mappings (
     mapping_json TEXT NOT NULL,
     PRIMARY KEY (source_name, version)
 );
+CREATE TABLE IF NOT EXISTS outcomes (
+    run_id       TEXT NOT NULL,
+    customer_id  TEXT NOT NULL,
+    predicted    REAL,
+    actual       INTEGER NOT NULL,
+    recorded_at  TEXT NOT NULL,
+    PRIMARY KEY (run_id, customer_id)
+);
 CREATE TABLE IF NOT EXISTS watermarks (
     source_name  TEXT PRIMARY KEY,
     column_name  TEXT NOT NULL,
@@ -130,6 +138,30 @@ class Registry:
                 "SELECT * FROM sources ORDER BY source_name", con)
 
     # ------------------------------------------------------------------ watermarks
+
+    def record_outcomes(self, run_id: str, frame) -> int:
+        """Upsert realized outcomes (customer_id, actual, predicted) for a
+        run - the delayed labels that grade past predictions."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows = [(run_id, str(r["customer_id"]),
+                 (None if pd.isna(r.get("predicted")) else float(r["predicted"])),
+                 int(r["actual"]), now)
+                for _, r in frame.iterrows()]
+        with self._connect() as con:
+            con.executemany(
+                "INSERT INTO outcomes (run_id, customer_id, predicted, actual, "
+                "recorded_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id, customer_id) DO UPDATE SET "
+                "predicted=excluded.predicted, actual=excluded.actual, "
+                "recorded_at=excluded.recorded_at", rows)
+        return len(rows)
+
+    def outcomes_for(self, run_id: str) -> pd.DataFrame:
+        with self._connect() as con:
+            return pd.read_sql_query(
+                "SELECT customer_id, predicted, actual, recorded_at "
+                "FROM outcomes WHERE run_id = ?", con, params=(run_id,))
 
     def get_watermark(self, source_name: str) -> dict | None:
         """The last high-water mark for incremental ingestion, or None on the

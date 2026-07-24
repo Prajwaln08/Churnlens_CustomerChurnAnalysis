@@ -35,6 +35,13 @@ class RunRequest(BaseModel):
     autonomy_level: int = 1
 
 
+class OutcomesRequest(BaseModel):
+    run_id: str
+    records: list[dict] = Field(min_length=1)
+    id_column: str = "customer_id"
+    actual_column: str = "actual"
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="ChurnLens API",
                   description="Who leaves - when - who can be saved - "
@@ -81,6 +88,30 @@ def create_app() -> FastAPI:
                 "mode": (manifest.data["reports"].get("mode_decision") or {})
                         .get("mode"),
                 "ledger": manifest.ledger_lines()}
+
+    @app.post("/outcomes")
+    def outcomes(payload: OutcomesRequest) -> dict:
+        """Grade a past run against realized outcomes (delayed labels)."""
+        from phase_2.monitoring import outcomes as outcomes_mod
+
+        try:
+            m = RunManifest.load(payload.run_id)
+        except FileNotFoundError:
+            raise HTTPException(404, f"unknown run '{payload.run_id}'")
+        scored_path = m.run_dir / "scored.parquet"
+        if not scored_path.exists():
+            raise HTTPException(404, "run has no scored output to grade")
+        actuals = pd.DataFrame(payload.records)
+        for col in (payload.id_column, payload.actual_column):
+            if col not in actuals.columns:
+                raise HTTPException(422, f"records lack column '{col}'")
+        rep = outcomes_mod.realized_performance(
+            pd.read_parquet(scored_path), actuals,
+            payload.id_column, payload.actual_column)
+        frame = rep.pop("frame", None)
+        if rep.get("status") == "ok" and frame is not None:
+            Registry().record_outcomes(payload.run_id, frame)
+        return rep
 
     @app.get("/runs")
     def runs(limit: int = 20) -> list[dict]:

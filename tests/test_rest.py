@@ -73,3 +73,25 @@ def test_unknown_run_404(client):
 
 def test_empty_records_rejected(client):
     assert client.post("/validate", json={"records": []}).status_code == 422
+
+
+def test_outcomes_endpoint_grades_a_run(client, labeled_frame):
+    run = client.post("/run", json={
+        "records": labeled_frame.to_dict("records"),
+        "source": "outcome-src", "autonomy_level": 1})
+    assert run.status_code == 200
+    run_id = run.json()["run_id"]
+    actuals = [{"customer_id": cid, "actual": int(ch)}
+               for cid, ch in zip(labeled_frame["customerID"],
+                                  labeled_frame["Churn"])]
+    resp = client.post("/outcomes", json={"run_id": run_id,
+                                          "records": actuals})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["matched"] >= 20
+    assert 0 <= body["realized_auc"] <= 1
+
+    missing = client.post("/outcomes", json={"run_id": "run_nope",
+                                             "records": actuals[:5]})
+    assert missing.status_code == 404

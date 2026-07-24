@@ -205,3 +205,31 @@ def test_served_artifact_refits_on_full_data(labeled_frame):
     assert report["lenses"]["A"]["refit_on_full"] is True
     scored = auto_train.score_with_dataset_model(labeled_frame, "refit-check")
     assert scored["churn_probability"].between(0, 1).all()
+
+
+def test_campaign_uplift_persists_and_reuses():
+    """Phase 2.3: the campaign-specific model saves under the dataset
+    namespace with its Qini score, and reuses instantly when features match."""
+    rng = np.random.default_rng(13)
+    n = 400
+    risk = rng.uniform(0, 1, n)
+    treated = rng.random(n) < 0.5
+    frame = pd.DataFrame({
+        "treatment_group": np.where(treated, "treatment", "control"),
+        "conversion": (rng.random(n) < 0.25 + 0.3 * risk * treated).astype(int),
+        "engagement": (risk * 100).round(1),
+        "spend_m": rng.uniform(10, 90, n).round(2),
+    })
+    scored, rep = auto_train.train_uplift_for_campaign(
+        frame, dataset_id="camp-src")
+    assert scored is not None and "uplift_score" in scored.columns
+    assert rep.get("persisted") is True
+    assert "qini_auc" in rep
+
+    scored2, rep2 = auto_train.score_campaign_with_saved(frame, "camp-src")
+    assert scored2 is not None and "uplift_score" in scored2.columns
+    assert "saved artifact" in rep2["engine"]
+
+    renamed = frame.rename(columns={"engagement": "eng2"})
+    s3, r3 = auto_train.score_campaign_with_saved(renamed, "camp-src")
+    assert s3 is None and r3 is None

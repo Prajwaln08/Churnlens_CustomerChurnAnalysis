@@ -31,6 +31,8 @@ from phase_2 import connectors, profiler  # noqa: E402
 from phase_2.analytics import insights as ins  # noqa: E402
 from phase_2.analytics import journeys as jn  # noqa: E402
 from phase_2.mapping import CANONICAL  # noqa: E402
+from phase_2.monitoring import outcomes as outcomes_mod  # noqa: E402
+from phase_2.training import mode as train_mode  # noqa: E402
 from phase_2.training import auto_train  # noqa: E402
 from phase_2.orchestration import Registry, RunManifest, run_pipeline  # noqa: E402
 
@@ -966,7 +968,8 @@ with tab_newdata:
                      key="reset_session"):
             for _k in ("integ_pending", "integ_done", "integ_src",
                        "companion_events", "companion_campaign",
-                       "campaign_scored", "campaign_fit"):
+                       "campaign_scored", "campaign_fit",
+                       "session_campaign_trained"):
                 st.session_state.pop(_k, None)
             st.session_state["session_runs"] = []
             st.session_state["session_trained"] = set()
@@ -1195,6 +1198,85 @@ with tab_process:
             status_table(bundle["stage_frame"][["stage", "status", "elapsed_s",
                                                 "rows_out", "notes"]].fillna("-"))
             dark_ledger(bundle["ledger"])
+            with st.expander("Actuals check - grade past predictions"):
+                html(f'<div style="font-size:12.5px;color:{MUTED};'
+                     f'margin-bottom:8px;">Predictions are promises. When the '
+                     'real outcomes arrive later, upload them here (a customer '
+                     'id plus what actually happened) and this run gets graded '
+                     'on realized performance - the honest closing of the '
+                     'loop.</div>')
+                scored_run = bundle.get("scored")
+                if (scored_run is None
+                        or "churn_probability" not in scored_run.columns):
+                    st.info("This run has no scored probabilities to grade.")
+                else:
+                    up_act = st.file_uploader(
+                        "Actual outcomes (csv / parquet)",
+                        type=["csv", "parquet"], key=f"actuals_{run_pick}")
+                    if up_act is not None:
+                        try:
+                            act_df = (pd.read_csv(up_act)
+                                      if up_act.name.endswith(".csv")
+                                      else pd.read_parquet(up_act))
+                        except Exception as exc:
+                            act_df = None
+                            banner("err", "Could not read the actuals file",
+                                   f"{type(exc).__name__}: {exc}")
+                        if act_df is not None:
+                            cols_a = list(act_df.columns)
+                            g_id = next((c for c in cols_a
+                                         if "id" in c.lower()), cols_a[0])
+                            g_out = next(
+                                (c for c in cols_a if any(
+                                    k in c.lower() for k in
+                                    ("churn", "actual", "outcome", "label"))),
+                                cols_a[-1])
+                            ac1, ac2 = st.columns(2)
+                            id_c = ac1.selectbox(
+                                "Customer id column", cols_a,
+                                index=cols_a.index(g_id),
+                                key=f"act_id_{run_pick}")
+                            out_c = ac2.selectbox(
+                                "Actual outcome column", cols_a,
+                                index=cols_a.index(g_out),
+                                key=f"act_out_{run_pick}")
+                            rep_o = outcomes_mod.realized_performance(
+                                scored_run, act_df, id_c, out_c)
+                            if rep_o["status"] != "ok":
+                                banner("warn", "Cannot grade yet",
+                                       rep_o["reason"])
+                            else:
+                                Registry().record_outcomes(
+                                    run_pick, rep_o.pop("frame"))
+                                trained_a = ((data.get("reports", {})
+                                              .get("training", {})
+                                              .get("lenses", {}) or {})
+                                             .get("A", {}) or {}).get(
+                                                 "test_roc_auc")
+                                tile_row([
+                                    tile("Customers matched",
+                                         f"{rep_o['matched']:,}", accent=BLUE),
+                                    tile("Realized AUC",
+                                         f"{rep_o['realized_auc']:.3f}",
+                                         (f"vs {trained_a:.3f} at training"
+                                          if trained_a else "held-out grade"),
+                                         accent=GREEN if rep_o["healthy"]
+                                         else RED,
+                                         value_color=GREEN if rep_o["healthy"]
+                                         else RED),
+                                    tile("Top-decile precision",
+                                         f"{rep_o['precision_top_decile']:.0%}",
+                                         "actual churners in the top 10%",
+                                         accent=BLUE),
+                                    tile("Actual churn rate",
+                                         f"{rep_o['actual_churn_rate']:.1%}",
+                                         accent=INK)])
+                                banner("ok" if rep_o["healthy"] else "warn",
+                                       "Model holding up" if rep_o["healthy"]
+                                       else "Retrain recommended",
+                                       rep_o["verdict"] + " (gate "
+                                       f"{rep_o['gate']}). Outcomes recorded "
+                                       "to the registry.")
             for name, payload_rep in data.get("reports", {}).items():
                 with st.expander(f"Report: {name}"):
                     st.json(payload_rep)
@@ -1375,6 +1457,97 @@ with tab_dash:
                  f'{delta_chip}'
                  f'<span style="margin-left:auto;">{spark_html}</span></div>'
                  f'{kpi_html}{narr_html}</div>')
+
+            with st.expander("Churn over time - trend and cohorts"):
+                _date_cands = {}
+                for c_t in scored.columns:
+                    if (str(scored[c_t].dtype).startswith("datetime")
+                            or "date" in c_t.lower() or "time" in c_t.lower()):
+                        parsed_t = pd.to_datetime(scored[c_t], errors="coerce")
+                        if parsed_t.notna().mean() > 0.8:
+                            _date_cands[c_t] = parsed_t
+                if not _date_cands:
+                    st.info("This dataset carries no usable date column - the "
+                            "over-time view needs one (a signup or period "
+                            "date). Population analytics per lens are "
+                            "unaffected below.")
+                else:
+                    dc_t = max(_date_cands,
+                               key=lambda c: _date_cands[c].notna().mean())
+                    month_t = _date_cands[dc_t].dt.to_period("M").astype(str)
+                    has_label_t = "Churn" in scored.columns
+                    val_t = (scored["Churn"].astype(str).str.lower()
+                             .isin(("yes", "1", "true")).astype(float)
+                             if has_label_t
+                             else pd.to_numeric(scored["churn_probability"],
+                                                errors="coerce"))
+                    grp = val_t.groupby(month_t)
+                    trend_t = grp.mean()[grp.size() >= 30]
+                    ct1, ct2 = st.columns(2)
+                    with ct1:
+                        html('<div style="font-size:13px;font-weight:700;'
+                             'margin-bottom:6px;">'
+                             + ("Actual" if has_label_t else "Predicted")
+                             + f' churn rate by {dc_t} month</div>')
+                        if len(trend_t) < 2:
+                            st.info("Fewer than two months with 30+ customers "
+                                    "- not enough for a trend.")
+                        else:
+                            fig_t, ax_t = _fig(7, 3.2)
+                            ax_t.plot(range(len(trend_t)), trend_t.values,
+                                      color=BLUE, linewidth=2, marker="o",
+                                      markersize=3)
+                            ax_t.set_xticks(range(len(trend_t)))
+                            ax_t.set_xticklabels(trend_t.index, rotation=45,
+                                                 fontsize=7, ha="right")
+                            ax_t.yaxis.set_major_formatter(
+                                lambda y_, _: f"{y_:.0%}")
+                            _style_ax(ax_t)
+                            fig_t.tight_layout()
+                            st.pyplot(fig_t)
+                    with ct2:
+                        if has_label_t and "tenure" in scored.columns:
+                            html('<div style="font-size:13px;font-weight:700;'
+                                 'margin-bottom:6px;">Share still active - '
+                                 'cohort month x tenure bucket</div>')
+                            buckets_t = pd.cut(
+                                pd.to_numeric(scored["tenure"],
+                                              errors="coerce"),
+                                [0, 3, 6, 12, 24, 999],
+                                labels=["0-3", "4-6", "7-12", "13-24", "25+"])
+                            pivot_t = (pd.DataFrame({
+                                "cohort": month_t, "bucket": buckets_t,
+                                "churn": val_t})
+                                .pivot_table(index="cohort", columns="bucket",
+                                             values="churn", aggfunc="mean",
+                                             observed=True).tail(12))
+                            if pivot_t.empty:
+                                st.info("Not enough labeled cohorts for the "
+                                        "heatmap.")
+                            else:
+                                surv_t = 1 - pivot_t
+                                fig_h, ax_h = _fig(7, 3.2)
+                                im = ax_h.imshow(surv_t.values, cmap="RdYlGn",
+                                                 vmin=0, vmax=1,
+                                                 aspect="auto")
+                                ax_h.set_xticks(range(len(surv_t.columns)))
+                                ax_h.set_xticklabels(surv_t.columns,
+                                                     fontsize=8)
+                                ax_h.set_yticks(range(len(surv_t.index)))
+                                ax_h.set_yticklabels(surv_t.index, fontsize=7)
+                                ax_h.set_xlabel("tenure (months)")
+                                for i_h in range(surv_t.shape[0]):
+                                    for j_h in range(surv_t.shape[1]):
+                                        v_h = surv_t.values[i_h, j_h]
+                                        if pd.notna(v_h):
+                                            ax_h.text(j_h, i_h, f"{v_h:.0%}",
+                                                      ha="center", va="center",
+                                                      fontsize=7)
+                                fig_h.tight_layout()
+                                st.pyplot(fig_h)
+                        else:
+                            st.info("Cohort heatmap needs a churn label and a "
+                                    "tenure column.")
 
             # ---- lens cards + navigation
             jframe_all = snapshot_journeys(scored, None)
@@ -1771,6 +1944,7 @@ with tab_dash:
                                 "'Companion files' in 02 Add your data to unlock "
                                 "uplift targeting.")
                     else:
+                        fit_rep = None
                         rep_t = pipeline.validate(df_t)
                         if not rep_t["lenses"]["C"]["ok"]:
                             banner("err", "Lens C", rep_t["lenses"]["C"]["message"])
@@ -1782,15 +1956,32 @@ with tab_dash:
                                 if "do not match the trained" in err_c:
                                     _ck = (len(df_t), tuple(df_t.columns))
                                     _cached = st.session_state.get("campaign_fit")
+                                    _ds = train_mode.dataset_id_for(source)
+                                    st.session_state.setdefault(
+                                        "session_campaign_trained", set())
                                     if _cached and _cached[0] == _ck:
                                         scored_t, fit_rep = _cached[1], _cached[2]
                                     else:
-                                        with st.spinner(
-                                                "Training an uplift model on "
-                                                "this campaign's own features..."):
+                                        scored_t, fit_rep = None, None
+                                        if _ds in st.session_state[
+                                                "session_campaign_trained"]:
                                             scored_t, fit_rep = (
                                                 auto_train
-                                                .train_uplift_for_campaign(df_t))
+                                                .score_campaign_with_saved(
+                                                    df_t, _ds))
+                                        if scored_t is None:
+                                            with st.spinner(
+                                                    "Training an uplift model "
+                                                    "on this campaign's own "
+                                                    "features..."):
+                                                scored_t, fit_rep = (
+                                                    auto_train
+                                                    .train_uplift_for_campaign(
+                                                        df_t, dataset_id=_ds))
+                                            if scored_t is not None:
+                                                st.session_state[
+                                                    "session_campaign_trained"
+                                                ].add(_ds)
                                         st.session_state["campaign_fit"] = (
                                             _ck, scored_t, fit_rep)
                                     if scored_t is None:
@@ -1800,6 +1991,15 @@ with tab_dash:
                                                "was attempted, but: "
                                                + fit_rep.get("reason", "unknown")
                                                + ".")
+                                    elif "saved artifact" in str(
+                                            fit_rep.get("engine", "")):
+                                        banner("info",
+                                               "Campaign-specific uplift model "
+                                               "(reused)",
+                                               "Scoring with the campaign model "
+                                               "this session trained earlier "
+                                               "for this source - instant, no "
+                                               "retraining.")
                                     else:
                                         banner("info",
                                                "Campaign-specific uplift model",
@@ -1844,7 +2044,7 @@ with tab_dash:
                                         "that the same budget spent randomly would "
                                         "miss - and every skipped sleeping dog is "
                                         "a churn the campaign avoids causing.")
-                                    tile_row([
+                                    tiles_c = [
                                         tile("Customers scored", f"{len(scored_t):,}",
                                              accent=BLUE),
                                         tile("Mean uplift", f"{up.mean():+.3f}",
@@ -1853,7 +2053,14 @@ with tab_dash:
                                              f"{persuadable['uplift_score'].mean():+.3f}",
                                              accent=GREEN, value_color=GREEN),
                                         tile("Sleeping dogs - negative", f"{sleeping:,}",
-                                             accent=RED, value_color=RED)])
+                                             accent=RED, value_color=RED)]
+                                    if fit_rep and fit_rep.get("qini_auc") is not None:
+                                        tiles_c.append(tile(
+                                            "Qini AUC",
+                                            f"{fit_rep['qini_auc']:+.3f}",
+                                            "out-of-fold targeting quality",
+                                            accent=GREEN))
+                                    tile_row(tiles_c)
                                     c1, c2 = st.columns(2)
                                     with c1:
                                         html('<div style="font-size:13px;font-weight:700;'

@@ -316,7 +316,8 @@ def _train_survival(data: pd.DataFrame, features: list[str], y: pd.Series,
 
 def train_uplift_for_campaign(df: pd.DataFrame,
                               treatment_col: str = "treatment_group",
-                              outcome_col: str = "conversion"
+                              outcome_col: str = "conversion",
+                              dataset_id: str | None = None
                               ) -> tuple[pd.DataFrame | None, dict]:
     """Uplift on THIS campaign's own features: a cross-fitted T-learner.
     Every row is scored by models that never saw it (out-of-fold), so the
@@ -365,8 +366,59 @@ def train_uplift_for_campaign(df: pd.DataFrame,
         uplift.loc[va] = arm_proba(treated) - arm_proba(~treated)
     out = df.copy()
     out["uplift_score"] = uplift.round(4)
-    return out, {"engine": "campaign-specific T-learner (out-of-fold)",
-                 "features_used": len(feats), "treated": n_t, "control": n_c}
+    report = {"engine": "campaign-specific T-learner (out-of-fold)",
+              "features_used": len(feats), "treated": n_t, "control": n_c}
+    try:            # targeting quality of the out-of-fold scores
+        from sklift.metrics import qini_auc_score
+        report["qini_auc"] = round(float(qini_auc_score(
+            y, uplift, treated.astype(int))), 4)
+    except Exception:
+        pass
+    if dataset_id:   # persist final arms fit on all rows, for instant reuse
+        try:
+            def _fit_full(mask):
+                pipe = Pipeline([
+                    ("prep", make_preprocessor(numeric, categorical,
+                                               high_card)),
+                    ("clf", HistGradientBoostingClassifier(random_state=42))])
+                return pipe.fit(X[mask], y[mask])
+            if y[treated].nunique() == 2 and y[~treated].nunique() == 2:
+                save_model({"model_t": _fit_full(treated),
+                            "model_c": _fit_full(~treated),
+                            "features": feats,
+                            "treatment_col": treatment_col,
+                            "outcome_col": outcome_col,
+                            "report": report},
+                           "uplift_campaign", dataset_id=dataset_id)
+                report["persisted"] = True
+        except Exception:
+            pass
+    return out, report
+
+
+def score_campaign_with_saved(df: pd.DataFrame, dataset_id: str
+                              ) -> tuple[pd.DataFrame | None, dict | None]:
+    """Score a campaign file with the saved campaign-specific arms, when the
+    features line up. Returns (None, None) when there is nothing to reuse."""
+    from phase_1.modeling import load_model
+    from phase_1.serving.pipeline import artifact_exists
+
+    if not artifact_exists("uplift_campaign", dataset_id=dataset_id):
+        return None, None
+    try:
+        bundle = load_model("uplift_campaign", dataset_id=dataset_id)
+    except Exception:
+        return None, None
+    if any(c not in df.columns for c in bundle["features"]):
+        return None, None
+    X = df[bundle["features"]]
+    up = (bundle["model_t"].predict_proba(X)[:, 1]
+          - bundle["model_c"].predict_proba(X)[:, 1])
+    out = df.copy()
+    out["uplift_score"] = np.round(up, 4)
+    rep = dict(bundle.get("report") or {})
+    rep["engine"] = "campaign-specific T-learner (saved artifact)"
+    return out, rep
 
 
 def score_for_source(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
