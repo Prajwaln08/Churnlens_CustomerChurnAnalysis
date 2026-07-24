@@ -197,6 +197,61 @@ def _train_survival(data: pd.DataFrame, features: list[str], y: pd.Series,
         return {"status": "failed", "reason": str(exc)}
 
 
+def train_uplift_for_campaign(df: pd.DataFrame,
+                              treatment_col: str = "treatment_group",
+                              outcome_col: str = "conversion"
+                              ) -> tuple[pd.DataFrame | None, dict]:
+    """Uplift on THIS campaign's own features: a cross-fitted T-learner.
+    Every row is scored by models that never saw it (out-of-fold), so the
+    scores are honest rather than self-graded. Returns (scored frame, report)
+    or (None, {"reason": ...}) when the file cannot support a model."""
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.pipeline import Pipeline
+
+    feats = [c for c in df.columns if c not in (treatment_col, outcome_col)]
+    feats = [c for c in feats if df[c].nunique() > 1]
+    if not feats:
+        return None, {"reason": "no usable campaign features beyond "
+                                "treatment and outcome"}
+    t_raw = df[treatment_col].astype(str).str.strip().str.lower()
+    treated = t_raw.isin(("treatment", "treated", "test", "1", "true", "yes"))
+    y = pd.to_numeric(df[outcome_col], errors="coerce").fillna(0).astype(int)
+    if y.nunique() < 2:
+        return None, {"reason": "conversion never varies - nothing to learn"}
+    n_t, n_c = int(treated.sum()), int((~treated).sum())
+    if min(n_t, n_c) < 50:
+        return None, {"reason": f"needs at least 50 rows per arm "
+                                f"(treatment {n_t:,}, control {n_c:,})"}
+
+    X = df[feats]
+    numeric = X.select_dtypes("number").columns.tolist()
+    categorical, high_card = split_categoricals(
+        X, [c for c in feats if c not in numeric])
+    uplift = pd.Series(0.0, index=df.index)
+    strata = y.astype(str) + "_" + treated.astype(str)
+    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+    for tr_pos, va_pos in skf.split(X, strata):
+        tr, va = df.index[tr_pos], df.index[va_pos]
+
+        def arm_proba(arm_mask):
+            rows = tr[arm_mask.loc[tr]]
+            yy = y.loc[rows]
+            if yy.nunique() < 2:       # an arm-fold with one outcome value
+                return pd.Series(float(yy.iloc[0]), index=va)
+            pipe = Pipeline([
+                ("prep", make_preprocessor(numeric, categorical, high_card)),
+                ("clf", HistGradientBoostingClassifier(random_state=42))])
+            pipe.fit(X.loc[rows], yy)
+            return pd.Series(pipe.predict_proba(X.loc[va])[:, 1], index=va)
+
+        uplift.loc[va] = arm_proba(treated) - arm_proba(~treated)
+    out = df.copy()
+    out["uplift_score"] = uplift.round(4)
+    return out, {"engine": "campaign-specific T-learner (out-of-fold)",
+                 "features_used": len(feats), "treated": n_t, "control": n_c}
+
+
 def score_for_source(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
     """Score RAW records for a trained source: replays the source's saved
     (confirmed) mapping, cleaning, and derived features - the same recipe the

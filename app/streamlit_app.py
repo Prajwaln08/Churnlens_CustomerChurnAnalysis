@@ -155,8 +155,26 @@ def tile_row(tiles: list[str]) -> None:
          f'margin-bottom:16px;">' + "".join(tiles) + "</div>")
 
 
+CASUAL_STAGE = {
+    "ingest": "Reading your data...",
+    "profile": "Getting to know the columns...",
+    "map": "Matching columns to the canonical schema...",
+    "validate": "Checking which lenses this data can power...",
+    "clean": "Tidying things up...",
+    "eda_report": "Sketching the first charts...",
+    "mode": "Deciding whether to train fresh models...",
+    "train": "Training models - the longest step...",
+    "score": "Scoring every customer...",
+    "drift": "Running the stability check...",
+    "persist": "Saving everything...",
+    "narrate": "Writing the plain-English summary...",
+}
+_STAGE_ORDER = list(CASUAL_STAGE)
+
+
 def stage_streamer(live):
-    """Writer for run_pipeline(progress=...): one line per finished stage."""
+    """Feeds run_pipeline(progress=...): a casual headline for everyone, the
+    technical stage lines tucked inside for whoever expands the loader."""
     def write(name, entry):
         el = entry.get("elapsed_s")
         line = f"{name} - {entry['status']} ({el:.1f}s)" if el is not None \
@@ -165,6 +183,11 @@ def stage_streamer(live):
         if notes:
             line += " - " + str(notes[0])[:110]
         live.write(line)
+        try:
+            nxt = _STAGE_ORDER[_STAGE_ORDER.index(name) + 1]
+            live.update(label=":duck: " + CASUAL_STAGE[nxt])
+        except (ValueError, IndexError):
+            pass
     return write
 
 
@@ -187,7 +210,10 @@ def banner(kind: str, title: str, body: str, credit: str = "") -> None:
          f'{credit_html}</div>')
 
 
-def rec_action(body: str) -> None:
+def rec_action(body: str, impact: str | None = None) -> None:
+    if impact:
+        body += ('<br><span style="font-size:12.5px;opacity:.85;">'
+                 '<b>Why it pays:</b> ' + impact + '</span>')
     banner("info", "Recommended action", body)
 
 
@@ -606,7 +632,7 @@ def whatif_form() -> pd.DataFrame | None:
         tenure = c1.slider("Tenure (months)", 0, 72, 6)
         contract = c2.selectbox("Contract", ["Month-to-month", "One year", "Two year"])
         internet = c3.selectbox("Internet service", ["Fiber optic", "DSL", "No"])
-        monthly = c4.slider("Monthly charges ($)", 15.0, 150.0, 80.0, step=5.0)
+        monthly = c4.slider("Monthly charges ($)", 15, 150, 80, step=5)
 
         html('<div class="cl-kicker" style="margin:10px 0 6px;">Demographics &amp; services</div>')
         t1, t2, t3, t4, t5, t6 = st.columns(6)
@@ -630,8 +656,8 @@ def whatif_form() -> pd.DataFrame | None:
             protection = c2.selectbox("Device protection", ["No", "Yes"])
             tv = c3.selectbox("Streaming TV", ["No", "Yes"])
             movies = c4.selectbox("Streaming movies", ["No", "Yes"])
-            total = st.number_input("Total charges ($)", 0.0, 12000.0,
-                                    float(monthly * max(tenure, 1)), step=50.0)
+            total = st.number_input("Total charges ($)", 0, 12000,
+                                    int(monthly * max(tenure, 1)), step=50)
 
         if not st.form_submit_button("Score this customer", type="primary"):
             return None
@@ -719,12 +745,15 @@ with tab_whatif:
         html('<div style="display:flex;justify-content:space-between;align-items:center;">'
              '<span style="font-family:\'Space Grotesk\',sans-serif;font-size:20px;'
              'font-weight:600;">Single customer - what-if</span>'
-             f'<span class="cl-mono" style="font-size:11.5px;color:{FAINT};">Models '
-             'trained on public IBM Telco customer data</span></div>'
-             f'<p style="margin:2px 0 10px;font-size:13px;color:{MUTED};">Adjust a '
-             'profile and score it against the fitted demo models - a test account to '
-             'try the tool before integrating real data. Analytics for integrated data '
-             'live in the Dashboard.</p>')
+             f'<span class="cl-mono" style="font-size:11px;font-weight:700;'
+             f'letter-spacing:.05em;color:#7a6410;background:#faf6e8;'
+             f'border:1.5px solid #e3d5a8;border-radius:16px;padding:6px 14px;">'
+             'DEMO SANDBOX - NOT YOUR DATA</span></div>'
+             f'<p style="margin:2px 0 10px;font-size:13px;color:{MUTED};">'
+             '<b>Everything on this tab runs on demo models trained on the public '
+             'IBM Telco dataset - none of it reflects your data.</b> Adjust a '
+             'profile and score it to try the tool; bring real data through '
+             '02 Add your data, and its analytics appear in 04 Dashboard.</p>')
         df_w = whatif_form()
     if df_w is not None:
         scored_w, _ = pipeline.score(df_w)
@@ -871,17 +900,17 @@ with tab_newdata:
                 st.session_state.pop("integ_pending", None)
                 m = None
                 try:
-                    with st.status("Running the staged pipeline - stages appear "
-                                   "here as they finish (a new schema may take "
-                                   "~1 min at the mapping step)",
-                                   expanded=True) as live:
+                    with st.status(":duck: Reading your data... (expand for "
+                                   "the technical stage log)",
+                                   expanded=False) as live:
                         m = run_pipeline(
                             payload if payload is not None else df_i,
                             source_i, autonomy_level=level_i,
                             force_train=(source_i not in
                                          st.session_state["session_trained"]),
                             progress=stage_streamer(live))
-                        live.update(label="Pipeline finished", state="complete")
+                        live.update(label="All done - dashboards ready",
+                                    state="complete")
                 except Exception as exc:
                     banner("err", "Run failed", f"{type(exc).__name__}: {exc}")
                 if m is not None:
@@ -937,7 +966,7 @@ with tab_newdata:
                      key="reset_session"):
             for _k in ("integ_pending", "integ_done", "integ_src",
                        "companion_events", "companion_campaign",
-                       "campaign_scored"):
+                       "campaign_scored", "campaign_fit"):
                 st.session_state.pop(_k, None)
             st.session_state["session_runs"] = []
             st.session_state["session_trained"] = set()
@@ -1009,9 +1038,9 @@ with tab_newdata:
                             "quarantine": prop.get("quarantine", [])}
                 m = None
                 try:
-                    with st.status("Running with the confirmed mapping - stages "
-                                   "appear here as they finish",
-                                   expanded=True) as live:
+                    with st.status(":duck: Running with your confirmed "
+                                   "mapping... (expand for the stage log)",
+                                   expanded=False) as live:
                         m = run_pipeline(
                             payload if payload is not None else df_i,
                             pending["source"], autonomy_level=0,
@@ -1019,7 +1048,8 @@ with tab_newdata:
                             force_train=(pending["source"] not in
                                          st.session_state["session_trained"]),
                             progress=stage_streamer(live))
-                        live.update(label="Pipeline finished", state="complete")
+                        live.update(label="All done - dashboards ready",
+                                    state="complete")
                 except Exception as exc:
                     banner("err", "Run failed", f"{type(exc).__name__}: {exc}")
                 if m is not None:
@@ -1401,12 +1431,19 @@ with tab_dash:
                                                  "revenue_at_risk"].sum())
                                 if has_rar and crit else 0.0)
                     if crit:
-                        body = (f"Contact the {crit:,} Critical-band customers first, "
-                                f"ordered by revenue at risk.")
+                        impact = ("Critical customers are the densest slice of the "
+                                  "problem - highest probability of leaving, still "
+                                  "reachable today.")
                         if crit_rar:
-                            body += (f" At an assumed 18% save rate this protects about "
-                                     f"{money(crit_rar * 0.18)}.")
-                        rec_action(body)
+                            impact = (f"these {crit:,} customers hold "
+                                      f"{money(crit_rar)} of revenue at risk. At a "
+                                      f"conservative 18% save rate, working this "
+                                      f"list protects about "
+                                      f"{money(crit_rar * 0.18)} - and because it "
+                                      f"is ranked, the first call of the day is "
+                                      f"always the highest-stakes one.")
+                        rec_action(f"Contact the {crit:,} Critical-band customers "
+                                   "first, ordered by revenue at risk.", impact)
                     mean_p = float(scored["churn_probability"].mean())
                     tiles = [tile("High + Critical", f"{hi_crit:,}", accent=RED),
                              tile("Mean churn probability", f"{mean_p:.0%}", accent=BLUE)]
@@ -1460,10 +1497,20 @@ with tab_dash:
                                  "censoring-aware survival analysis")
                     jopts = slice_options(scored)
                     if len(timing_all):
-                        rec_action(f"The exit peak falls around period "
-                                   f"{int(timing_all.idxmax())} of the journey. "
-                                   "Front-load onboarding and schedule a proactive "
-                                   "check-in before the peak.")
+                        peak_b = int(timing_all.idxmax())
+                        share_by_peak = (float(
+                            (timing_all[timing_all.index <= peak_b].sum())
+                            / timing_all.sum()) if timing_all.sum() else 0)
+                        rec_action(
+                            f"The exit peak falls around period {peak_b} of the "
+                            "journey. Front-load onboarding and schedule a "
+                            "proactive check-in before the peak.",
+                            f"{share_by_peak:.0%} of all churn has already "
+                            f"happened by period {peak_b} - outreach scheduled "
+                            "after the peak lands on customers who are already "
+                            "gone. Moving the check-in one period earlier reaches "
+                            "every eventual churner while the relationship is "
+                            "still alive.")
                     tiles = []
                     if "expected_remaining_tenure" in scored.columns:
                         med = float(scored["expected_remaining_tenure"].median())
@@ -1647,9 +1694,12 @@ with tab_dash:
 
             # ---------------- LENS C ----------------
             elif sel_key == "C":
-                if not pipeline.artifact_exists("uplift_model"):
-                    banner("warn", "Lens C", "Uplift artifact not trained yet - "
-                                             "run notebook 03.")
+                if (not pipeline.artifact_exists("uplift_model")
+                        and st.session_state.get("companion_campaign") is None):
+                    banner("warn", "Lens C",
+                           "Connect a campaign file in 02 Add your data "
+                           "(Companion files) - Lens C trains a campaign-specific "
+                           "uplift model from it.")
                 else:
                     html(f'<div style="background:#faf6e8;border:1px solid #ece2c2;'
                          f'border-radius:16px;padding:26px 28px;text-align:center;'
@@ -1684,21 +1734,45 @@ with tab_dash:
                             if "uplift_score" not in scored_t.columns:
                                 err_c = str(run_rep.get("errors", {}).get(
                                     "C", "features do not match the trained model"))
-                                if "do not match the trained uplift model" in err_c:
-                                    banner("err",
-                                           "This campaign file does not fit the "
-                                           "demo uplift model", err_c + ". Uplift "
-                                           "models are campaign-specific by nature: "
-                                           "the demo artifact was trained on the "
-                                           "MegaFon experiment (features X_1 to "
-                                           "X_50), so it can only score files with "
-                                           "that shape. Try the demo campaign file "
-                                           "to see the flow, or train an uplift "
-                                           "model on this campaign log via "
-                                           "notebook 03.")
+                                if "do not match the trained" in err_c:
+                                    _ck = (len(df_t), tuple(df_t.columns))
+                                    _cached = st.session_state.get("campaign_fit")
+                                    if _cached and _cached[0] == _ck:
+                                        scored_t, fit_rep = _cached[1], _cached[2]
+                                    else:
+                                        with st.spinner(
+                                                "Training an uplift model on "
+                                                "this campaign's own features..."):
+                                            scored_t, fit_rep = (
+                                                auto_train
+                                                .train_uplift_for_campaign(df_t))
+                                        st.session_state["campaign_fit"] = (
+                                            _ck, scored_t, fit_rep)
+                                    if scored_t is None:
+                                        banner("err", "Could not model this "
+                                               "campaign file",
+                                               "A campaign-specific uplift model "
+                                               "was attempted, but: "
+                                               + fit_rep.get("reason", "unknown")
+                                               + ".")
+                                    else:
+                                        banner("info",
+                                               "Campaign-specific uplift model",
+                                               "The demo artifact does not fit "
+                                               "this file, so a T-learner was "
+                                               "trained on this campaign's own "
+                                               f"{fit_rep['features_used']} "
+                                               "features (treatment "
+                                               f"{fit_rep['treated']:,} / control "
+                                               f"{fit_rep['control']:,}). Scores "
+                                               "are out-of-fold - every customer "
+                                               "is scored by models that never "
+                                               "saw them.")
                                 else:
                                     banner("err", "Uplift scoring failed", err_c)
-                            else:
+                                    scored_t = None
+                            if (scored_t is not None
+                                    and "uplift_score" in scored_t.columns):
                                 up = scored_t["uplift_score"]
                                 top_n = max(1, len(up) // 10)
                                 persuadable = scored_t.nlargest(top_n, "uplift_score")
@@ -1710,10 +1784,21 @@ with tab_dash:
                                 with st.container(border=True):
                                     section_head("C", "Who can be saved",
                                                  "uplift model - treatment vs control")
+                                    extra_saves = int(round(
+                                        max(float(persuadable["uplift_score"]
+                                                  .mean()), 0) * top_n))
                                     rec_action(
-                                        f"Direct campaign spend at the {top_n:,} top-decile "
-                                        f"persuadables. Exclude the {sleeping:,} sleeping "
-                                        f"dogs - contacting them increases churn.")
+                                        f"Direct campaign spend at the {top_n:,} "
+                                        "top-decile persuadables. Exclude the "
+                                        f"{sleeping:,} sleeping dogs - contacting "
+                                        "them increases churn.",
+                                        f"a top-decile uplift of "
+                                        f"{persuadable['uplift_score'].mean():+.1%} "
+                                        f"means roughly {extra_saves:,} extra "
+                                        f"conversions from these {top_n:,} contacts "
+                                        "that the same budget spent randomly would "
+                                        "miss - and every skipped sleeping dog is "
+                                        "a churn the campaign avoids causing.")
                                     tile_row([
                                         tile("Customers scored", f"{len(scored_t):,}",
                                              accent=BLUE),
@@ -1769,8 +1854,13 @@ with tab_dash:
                             rec_action(
                                 f"Cluster {worst_seg['segment']} churns at "
                                 f"{worst_seg['mean_churn_probability']:.0%}, about "
-                                f"{ratio:.1f}x the base rate - fix the root cause there "
-                                f"first.")
+                                f"{ratio:.1f}x the base rate - fix the root cause "
+                                "there first.",
+                                f"one shared fix beats thousands of individual "
+                                f"saves: this cluster's {worst_seg['size']:,} "
+                                "customers share a profile, so a single product or "
+                                "pricing change aimed at it moves the company-wide "
+                                "churn number more than any per-customer effort.")
                         sizes = [s["size"] for s in seg_profiles]
                         labels = [f"cluster {s['segment']}" for s in seg_profiles]
                         c1, c2 = st.columns([1, 1.3])
@@ -1835,9 +1925,14 @@ with tab_dash:
                                            ["revenue_at_risk"].sum()) / total_rar
                                      if total_rar else 0)
                         rec_action(
-                            f"Route the top {top_n} accounts - {top_share:.0%} of total "
-                            f"exposure - to the retention desk first. Automate offers "
-                            f"for the long tail.")
+                            f"Route the top {top_n} accounts - {top_share:.0%} of "
+                            "total exposure - to the retention desk first. "
+                            "Automate offers for the long tail.",
+                            f"concentration is leverage: {top_share:.0%} of "
+                            f"everything at stake sits with just {top_n} accounts, "
+                            "so a handful of successful saves protects a "
+                            "disproportionate share of revenue while the automated "
+                            "long tail costs almost nothing to run.")
                         tiles = [tile("Total revenue at risk", money(total_rar),
                                       accent=AMBER)]
                         if len(history) >= 2 and history.values[-2] > 0:
@@ -1918,8 +2013,12 @@ with tab_dash:
                                 col_w = fields[i % len(fields)]
                                 series = scored[feat]
                                 if pd.api.types.is_numeric_dtype(series):
-                                    lo, hi = float(series.min()), float(series.max())
-                                    med = float(series.median())
+                                    lo = int(np.floor(float(series.min())))
+                                    hi = int(np.ceil(float(series.max())))
+                                    if hi <= lo:
+                                        hi = lo + 1
+                                    med = min(max(int(round(float(
+                                        series.median()))), lo), hi)
                                     values[feat] = col_w.slider(feat, lo, hi, med)
                                 else:
                                     opts = series.astype(str).value_counts().index[:20]

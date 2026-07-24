@@ -74,7 +74,7 @@ datasets; the numbers are actual outputs, illustrative of the workflow.
   against what customers actually did in the final 180 days.
 - **Self-bootstrapping deployment:** a fresh install trains its demo models from the
   public Telco dataset on first boot - no artifacts needed in git.
-- **Tested:** 94 tests cover profiling, mapping, orchestration, training, drift,
+- **Tested:** 99 tests cover profiling, mapping, orchestration, training, drift,
   analytics, connectors and both serving doors; they run offline in CI on every push.
 
 ## The app - four steps
@@ -90,7 +90,9 @@ datasets; the numbers are actual outputs, illustrative of the workflow.
 4. **Dashboard** - unlocked once a run completes. Population analytics per lens
    (A to E), each with its own KPIs, charts, drill tables, narration and lineage,
    plus a what-if section that scores hypothetical customers on the integrated
-   dataset's own model with per-profile driver explanations.
+   dataset's own model with per-profile driver explanations. Lens C trains a
+   campaign-specific uplift model on the fly when a connected campaign file
+   does not fit the demo artifact.
 
 ## Quickstart
 
@@ -153,7 +155,7 @@ Code/
     analytics/       insights.py, journeys.py (population + individual level)
     narration/       narrator.py (grounded summaries, number audit)
     api/             rest.py (FastAPI), mcp_server.py (MCP door)
-tests/                           # 94 tests, offline by design, run in CI
+tests/                           # 99 tests, offline by design, run in CI
 app/streamlit_app.py             # the ChurnLens UI (four-step flow above)
 assets/                          # README charts
 docs/                            # local design and planning notes (not committed)
