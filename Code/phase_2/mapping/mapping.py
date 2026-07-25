@@ -148,6 +148,63 @@ def ollama_available(url: str = OLLAMA_URL) -> bool:
         return False
 
 
+def remote_llm_config() -> dict | None:
+    """OpenAI-compatible hosted endpoint (e.g. Groq's free tier) from env:
+    CHURNLENS_LLM_BASE_URL, CHURNLENS_LLM_API_KEY, CHURNLENS_LLM_MODEL.
+    Lets cloud deploys keep real LLM mapping + narration at zero cost."""
+    url = os.getenv("CHURNLENS_LLM_BASE_URL", "").strip()
+    key = os.getenv("CHURNLENS_LLM_API_KEY", "").strip()
+    if not (url and key):
+        return None
+    return {"url": url.rstrip("/"), "key": key,
+            "model": os.getenv("CHURNLENS_LLM_MODEL",
+                               "llama-3.1-8b-instant").strip()}
+
+
+def llm_available() -> bool:
+    """Any grounded phrasing engine reachable - local Ollama wins (data never
+    leaves the machine); a configured hosted endpoint is the cloud fallback."""
+    return ollama_available() or remote_llm_config() is not None
+
+
+def llm_engine_name() -> str:
+    if ollama_available():
+        return f"ollama:{OLLAMA_MODEL}"
+    cfg = remote_llm_config()
+    return f"remote:{cfg['model']}" if cfg else "none"
+
+
+def llm_chat(prompt: str, json_mode: bool = False, timeout: int = 300) -> str:
+    """One prompt -> one completion over whichever transport is available.
+    Guardrails (sanitize, number audit) stay with the callers - the transport
+    only phrases."""
+    import requests
+
+    if ollama_available():
+        payload = {"model": OLLAMA_MODEL,
+                   "messages": [{"role": "user", "content": prompt}],
+                   "stream": False, "options": {"temperature": 0}}
+        if json_mode:
+            payload["format"] = "json"
+        resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload,
+                             timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()["message"]["content"]
+    cfg = remote_llm_config()
+    if cfg is None:
+        raise MappingError("no LLM transport available")
+    payload = {"model": cfg["model"],
+               "messages": [{"role": "user", "content": prompt}],
+               "temperature": 0}
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    resp = requests.post(f"{cfg['url']}/chat/completions",
+                         headers={"Authorization": f"Bearer {cfg['key']}"},
+                         json=payload, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
 def _build_prompt(profile: dict) -> str:
     canon_lines = [
         f"- {name}: {spec['desc']}"
@@ -174,30 +231,22 @@ def _build_prompt(profile: dict) -> str:
     )
 
 
+def llm_propose(profile: dict, timeout: int = 300) -> dict:
+    engine = llm_engine_name()
+    content = llm_chat(_build_prompt(profile), json_mode=True, timeout=timeout)
+    try:
+        raw = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise MappingError(f"LLM returned unparseable output: {exc}") from exc
+    proposal = _sanitize(raw, profile)
+    proposal["engine"] = engine
+    return proposal
+
+
 def ollama_propose(profile: dict, model: str = OLLAMA_MODEL,
                    url: str = OLLAMA_URL, timeout: int = 300) -> dict:
-    import requests
-
-    resp = requests.post(
-        f"{url}/api/chat",
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": _build_prompt(profile)}],
-            "stream": False,
-            "format": "json",
-            "options": {"temperature": 0},
-        },
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    try:
-        raw = json.loads(resp.json()["message"]["content"])
-    except (KeyError, json.JSONDecodeError) as exc:
-        raise MappingError(f"Ollama returned unparseable output: {exc}") from exc
-
-    proposal = _sanitize(raw, profile)
-    proposal["engine"] = f"ollama:{model}"
-    return proposal
+    """Back-compat alias - the transport decision now lives in llm_chat."""
+    return llm_propose(profile, timeout=timeout)
 
 
 def _sanitize(raw: dict, profile: dict) -> dict:
@@ -242,9 +291,9 @@ def propose_mapping(df: pd.DataFrame, use_llm: bool = True) -> dict:
     fuzzy otherwise. Deterministic quarantine flags ride along either way."""
     profile = profiler.profile_table(df)
     proposal = None
-    if use_llm and ollama_available():
+    if use_llm and llm_available():
         try:
-            proposal = ollama_propose(profile)
+            proposal = llm_propose(profile)
         except Exception:
             proposal = None  # any LLM failure -> fallback, never a dead end
     if proposal is None:

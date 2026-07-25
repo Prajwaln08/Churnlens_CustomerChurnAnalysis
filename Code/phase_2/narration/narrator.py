@@ -171,7 +171,7 @@ def narrate_run(manifest_data: dict, scored: pd.DataFrame | None = None,
     facts = facts_from_run(manifest_data, scored)
     fallback = template_summary(facts)
 
-    if use_llm and llm.ollama_available():
+    if use_llm and llm.llm_available():
         try:
             text = _ollama_summary(facts)
             # LLMs love typographic dashes and quotes - project style is ASCII
@@ -181,7 +181,7 @@ def narrate_run(manifest_data: dict, scored: pd.DataFrame | None = None,
                 text = text.replace(bad, good)
             violations = audit_numbers(text, facts)
             if not violations:
-                return {"summary": text, "engine": f"ollama:{llm.OLLAMA_MODEL}",
+                return {"summary": text, "engine": llm.llm_engine_name(),
                         "facts": facts, "audit_violations": []}
             return {"summary": fallback, "engine": "template (audit rejected LLM)",
                     "facts": facts, "audit_violations": violations}
@@ -192,8 +192,6 @@ def narrate_run(manifest_data: dict, scored: pd.DataFrame | None = None,
 
 
 def _ollama_summary(facts: dict) -> str:
-    import requests
-
     prompt = (
         "Facts about one completed data-pipeline run, as JSON:\n"
         + json.dumps(facts, indent=1, default=str) +
@@ -203,12 +201,4 @@ def _ollama_summary(facts: dict) -> str:
         "plainly; if models were trained, say whether they passed their quality "
         "gates; plain professional prose, no bullet points, no headings."
     )
-    resp = requests.post(
-        f"{llm.OLLAMA_URL}/api/chat",
-        json={"model": llm.OLLAMA_MODEL,
-              "messages": [{"role": "user", "content": prompt}],
-              "stream": False, "options": {"temperature": 0}},
-        timeout=240,
-    )
-    resp.raise_for_status()
-    return resp.json()["message"]["content"].strip()
+    return llm.llm_chat(prompt, timeout=240).strip()

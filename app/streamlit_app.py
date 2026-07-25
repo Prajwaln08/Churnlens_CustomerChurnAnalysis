@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import io
+import os
 import re
 import sys
 from pathlib import Path
@@ -32,6 +33,7 @@ from phase_2.analytics import fairness  # noqa: E402
 from phase_2.analytics import insights as ins  # noqa: E402
 from phase_2.analytics import journeys as jn  # noqa: E402
 from phase_2.mapping import CANONICAL  # noqa: E402
+from phase_2.mapping import mapping as mapping_mod  # noqa: E402
 from phase_2.monitoring import outcomes as outcomes_mod  # noqa: E402
 from phase_2.training import mode as train_mode  # noqa: E402
 from phase_2.training import auto_train  # noqa: E402
@@ -861,7 +863,7 @@ with tab_newdata:
              'font-weight:600;">Add your data</span>'
              f'<p style="margin:2px 0 12px;font-size:12.5px;color:{MUTED};line-height:1.5;">'
              'Bring any customer dataset - file, database or API. The pipeline profiles '
-             'it, the local LLM proposes a mapping, models train - then the Dashboard '
+             'it, an LLM proposes a mapping, models train - then the Dashboard '
              'unlocks. Confirmed mappings are remembered per source.</p>')
         with st.container(border=True):
             html('<div style="font-size:13px;font-weight:700;">No data handy? '
@@ -892,6 +894,12 @@ with tab_newdata:
                 st.caption("Loaded: " + ", ".join(_loaded_bits)
                            + " - now hit Run pipeline below.")
 
+        if mapping_mod.remote_llm_config() and not mapping_mod.ollama_available():
+            st.caption("LLM engine: hosted API ("
+                       + mapping_mod.llm_engine_name().split(":", 1)[-1]
+                       + ") - only column names, a few sample values and "
+                       "computed run facts are sent for phrasing; raw datasets "
+                       "never leave this server.")
         src_kind = st.segmented_control("Source type", ["File", "Database", "REST API"],
                                         default="File", key="integrate_kind")
         payload = None
@@ -969,7 +977,10 @@ with tab_newdata:
                 payload, df_i = fetched, fetched.frame
                 default_name = api_url.rstrip("/").split("/")[-1] if api_url else "api"
 
-        MAX_TEST_ROWS = 100_000
+        try:                    # deploy-size override (Community Cloud ~1GB)
+            MAX_TEST_ROWS = int(st.secrets["CHURNLENS_MAX_ROWS"])
+        except Exception:
+            MAX_TEST_ROWS = int(os.getenv("CHURNLENS_MAX_ROWS", "100000"))
         if df_i is not None and len(df_i) > MAX_TEST_ROWS:
             _orig_rows = len(df_i)
             df_i = df_i.sample(MAX_TEST_ROWS, random_state=42).reset_index(drop=True)

@@ -29,7 +29,7 @@ def test_fallback_when_ollama_errors(bank_frame, monkeypatch):
     monkeypatch.setattr(mapping, "ollama_available", lambda *a, **k: True)
     def boom(*a, **k):
         raise mapping.MappingError("garbage")
-    monkeypatch.setattr(mapping, "ollama_propose", boom)
+    monkeypatch.setattr(mapping, "llm_propose", boom)
     proposal = mapping.propose_mapping(bank_frame)
     assert proposal["engine"] == "fuzzy"
 
@@ -157,3 +157,40 @@ def test_churn_named_label_is_not_quarantined():
     assert "churned" not in {q["source"] for q in prop["quarantine"]}
     mapped, report = mapping.apply_mapping(frame, prop)
     assert "Churn" in mapped.columns
+
+
+def test_remote_llm_transport_used_when_no_ollama(bank_frame, monkeypatch):
+    """Cost-free cloud path: with Ollama absent and an OpenAI-compatible
+    endpoint configured, proposals flow through it - same sanitizer, same
+    confidence gates, engine named honestly."""
+    import json as _json
+    monkeypatch.setattr(mapping, "ollama_available", lambda *a, **k: False)
+    monkeypatch.setenv("CHURNLENS_LLM_BASE_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("CHURNLENS_LLM_API_KEY", "test-key")
+    monkeypatch.setenv("CHURNLENS_LLM_MODEL", "test-model")
+
+    calls = {}
+
+    class FakeResp:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"choices": [{"message": {"content": _json.dumps({
+                "mappings": [{"source": "cust_ref", "target": "customerID",
+                              "confidence": 0.95, "value_map": None}]})}}]}
+
+    def fake_post(url, **kwargs):
+        calls["url"] = url
+        calls["auth"] = kwargs.get("headers", {}).get("Authorization")
+        return FakeResp()
+
+    import requests
+    monkeypatch.setattr(requests, "post", fake_post)
+    assert mapping.llm_available()
+    prop = mapping.propose_mapping(bank_frame, use_llm=True)
+    assert prop["engine"] == "remote:test-model"
+    assert calls["url"] == "https://api.example.com/v1/chat/completions"
+    assert calls["auth"] == "Bearer test-key"
+    by_src = {m["source"]: m for m in prop["mappings"]}
+    assert by_src["cust_ref"]["target"] == "customerID"
