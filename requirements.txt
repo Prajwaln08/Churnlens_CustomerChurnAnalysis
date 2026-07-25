@@ -1,5 +1,5 @@
 # Core data stack
-pandas>=2.0
+pandas>=2.0,<3    # 3.x changes str dtype defaults - unvalidated
 numpy>=1.24
 matplotlib>=3.8
 seaborn>=0.13

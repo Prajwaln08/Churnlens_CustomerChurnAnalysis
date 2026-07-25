@@ -88,10 +88,11 @@ def derive_datetime_features(df: pd.DataFrame, derived: dict[str, str]) -> pd.Da
 
 def _numeric_label(series: pd.Series) -> pd.Series:
     """Yes/no/true/1/churned in any casing -> 1.0; everything else -> 0.0."""
-    if series.dtype == object:
-        s = series.astype(str).str.strip().str.lower()
-        return s.isin(("yes", "y", "true", "1", "churned")).astype(float)
-    return pd.to_numeric(series, errors="coerce").fillna(0).astype(float)
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce").fillna(0).astype(float)
+    # anything textual - object dtype in pandas 2, str dtype in pandas 3
+    s = series.astype(str).str.strip().str.lower()
+    return s.isin(("yes", "y", "true", "1", "churned")).astype(float)
 
 
 def _missingness_mirrors_label(col: pd.Series, y: pd.Series) -> bool:

@@ -264,3 +264,13 @@ def test_single_class_label_degrades_honestly():
     assert report["lenses"]["A"]["status"] == "skipped"
     assert "single class" in report["lenses"]["A"]["reason"]
     assert report["lenses"]["D"]["status"] == "promoted"
+
+
+def test_labels_survive_pandas_string_dtype():
+    """Regression (pandas 3 cloud bug): labels stored with the modern string
+    dtype (pandas 3 default) must normalize exactly like object dtype."""
+    from phase_2.training import leakage
+    obj = pd.Series(["yes", "no", "YES", "No"], dtype=object)
+    modern = pd.Series(["yes", "no", "YES", "No"], dtype="string")
+    assert list(leakage._numeric_label(obj)) == [1.0, 0.0, 1.0, 0.0]
+    assert list(leakage._numeric_label(modern)) == [1.0, 0.0, 1.0, 0.0]

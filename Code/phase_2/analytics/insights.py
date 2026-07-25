@@ -122,10 +122,10 @@ def enrich_and_summarize(scored: pd.DataFrame, dataset_id: str,
 # ---------------------------------------------------------------------------
 
 def _numeric_label(series: pd.Series) -> pd.Series:
-    if series.dtype == object:
-        s = series.astype(str).str.strip().str.lower()
-        return s.isin(("yes", "y", "true", "1", "churned")).astype(int)
-    return pd.to_numeric(series, errors="coerce").fillna(0).astype(int)
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce").fillna(0).astype(int)
+    s = series.astype(str).str.strip().str.lower()
+    return s.isin(("yes", "y", "true", "1", "churned")).astype(int)
 
 
 def _driver_deltas(pipe, out: pd.DataFrame, features: list[str]):

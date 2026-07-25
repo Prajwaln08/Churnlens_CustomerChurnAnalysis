@@ -49,10 +49,10 @@ def _content_hash(df: pd.DataFrame) -> str:
 
 
 def _numeric_label(series: pd.Series) -> pd.Series:
-    if series.dtype == object:
-        s = series.astype(str).str.strip().str.lower()
-        return s.isin(("yes", "y", "true", "1", "churned")).astype(float)
-    return pd.to_numeric(series, errors="coerce").fillna(0)
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce").fillna(0)
+    s = series.astype(str).str.strip().str.lower()
+    return s.isin(("yes", "y", "true", "1", "churned")).astype(float)
 
 
 def run_pipeline(
