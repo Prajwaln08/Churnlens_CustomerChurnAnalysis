@@ -24,4 +24,4 @@ sqlalchemy>=2.0      # database connector (Postgres/MySQL/Snowflake/SQLite)
 fastapi>=0.110       # REST serving door (phase_2/api/rest.py)
 uvicorn>=0.30        # ASGI server for the REST door
 mcp>=1.0             # agent serving door (phase_2/api/mcp_server.py)
-shap>=0.52             # Phase 3.1: exact tree SHAP for local driver explanations
+shap>=0.48             # Phase 3.1: tree SHAP for local drivers (0.51 on py3.11)
