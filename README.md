@@ -243,3 +243,13 @@ ingest -> profile -> map -> validate -> clean -> EDA -> mode -> train -> score -
 - **Three doors, one engine**: the Streamlit app, a FastAPI service
   (`uvicorn phase_2.api.rest:app`), and an MCP server so AI agents can operate the
   pipeline conversationally (`python -m phase_2.api.mcp_server`).
+
+## Author
+
+**Prajwal Nerkar** - designed, built and deployed end to end: the five-lens
+analysis, the data-agnostic pipeline, the LLM guardrails, and the live app.
+
+- GitHub: [@Prajwaln08](https://github.com/Prajwaln08)
+- Live project: https://churnlenstool.streamlit.app
+
+Feedback and questions are welcome - open an issue on this repository.
