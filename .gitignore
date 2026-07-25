@@ -29,3 +29,6 @@ runs/
 
 # OS
 .DS_Store
+
+# local LLM API credentials - never committed
+.streamlit/secrets.toml
