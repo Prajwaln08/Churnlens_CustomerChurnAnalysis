@@ -21,6 +21,8 @@ that takes any customer dataset - file, database or API - through a staged, audi
 flow to a live dashboard (`phase_2`). Prototyped in notebooks, productionized into
 importable packages, served through a Streamlit app, a REST API and an MCP server.
 
+> **Live demo:** https://churnlenstool.streamlit.app - one-click sample data, or bring any CSV; models train on what you upload.
+
 
 ---
 
