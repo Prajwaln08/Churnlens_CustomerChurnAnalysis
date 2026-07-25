@@ -13,7 +13,7 @@ that takes any customer dataset - file, database or API - through a staged, audi
 flow to a live dashboard (`phase_2`). Prototyped in notebooks, productionized into
 importable packages, served through a Streamlit app, a REST API and an MCP server.
 
-> **Live demo:** https://churnlenstool.streamlit.app - one-click sample data, or bring any CSV; models train on what you upload.
+> **Live demo:** https://churnlenstool.streamlit.app - one-click sample data, or bring any CSV; models train on what you upload (files beyond the deployment's row budget are sampled, with notice).
 
 ---
 
@@ -105,6 +105,9 @@ datasets; the numbers are actual outputs, illustrative of the workflow.
   graded (realized AUC vs training AUC -> "retrain recommended"); each
   trained artifact ships a model card; a fairness audit reports score gaps
   across user-flagged sensitive groups.
+- **Session-isolated:** every visitor gets a private session - uploads,
+  runs and dashboards are never visible to anyone else, and one click removes
+  connected data entirely.
 - **Tested:** 125 tests cover profiling, mapping, orchestration, training, drift,
   analytics, connectors and both serving doors; they run offline in CI on every push.
 
@@ -114,7 +117,7 @@ datasets; the numbers are actual outputs, illustrative of the workflow.
    public IBM Telco dataset; a test account to try the tool before integrating data.
 2. **Add your data** - bring a file, database table or REST API (or use the
    one-click synthetic samples if no data is handy). The pipeline
-   profiles it, the local LLM proposes a mapping to the canonical schema, and an
+   profiles it, an LLM proposes a mapping to the canonical schema, and an
    autonomy gate decides whether a human reviews it first (Level 0) or the run
    proceeds unattended (Level 1).
 3. **Process** - the run registry: every stage with status, timing, row counts and
@@ -157,7 +160,7 @@ python -m pytest tests/ -q   # from the project root
 ```
 
 Full analysis: run the notebooks in order (`Code/01_...` to `Code/05_...`).
-Notebooks 01-02 need the datasets in `Dataset/` (sources below); the MegaFon uplift
+Notebooks 01-02 need the datasets in `Dataset/` (sources above); the MegaFon uplift
 dataset downloads itself on first use.
 
 **LLM engine (pluggable):** schema mapping and run narration use a local
@@ -191,7 +194,7 @@ Code/
   phase_2/                       # the production pipeline (any dataset, staged runs)
     ingestion/       connectors.py (file / database / REST API, watermarks)
     profiling/       profiler.py (roles, label candidates, collinearity)
-    mapping/         mapping.py (local-LLM proposals, fuzzy fallback, value maps)
+    mapping/         mapping.py (LLM proposals - local or hosted, fuzzy fallback)
     orchestration/   orchestrator.py, run_manifest.py, registry.py
     training/        auto_train.py, leakage.py, mode.py
     monitoring/      drift.py (PSI vs training baseline)
@@ -219,9 +222,10 @@ ingest -> profile -> map -> validate -> clean -> EDA -> mode -> train -> score -
 
 - **Connectors** (files / SQL databases / REST APIs) all end at one internal shape;
   credentials are redacted, predicate pushdown and incremental watermarks supported.
-- **Local-LLM schema mapping** (Ollama, qwen2.5:7b) - foreign column names and value
-  levels are mapped to the canonical schema; proposals are confidence-gated,
-  human-confirmable, saved per source and reused forever. Data never leaves the machine.
+- **LLM schema mapping** (local Ollama, or a hosted OpenAI-compatible
+  endpoint) - foreign column names and value levels are mapped to the
+  canonical schema; proposals are confidence-gated, human-confirmable, saved
+  per source and reused forever. In local mode, data never leaves the machine.
 - **Mode decision** per dataset - score with existing models, TRAIN fresh ones on all
   surviving columns (leakage-screened, quality-gated: no model ships below its metric
   bar), or explore label-free.
@@ -230,10 +234,11 @@ ingest -> profile -> map -> validate -> clean -> EDA -> mode -> train -> score -
   Process tab.
 - **Drift monitoring** - PSI against the training baseline; crossing the alert
   threshold surfaces "retraining recommended".
-- **Grounded LLM narration** - run summaries written by the local model with a number
+- **Grounded LLM narration** - run summaries written by the configured engine with a number
   audit: any figure not present in the computed facts rejects the text entirely.
 - **Analytics at two levels** - population (drivers, segments, lift, retention curves,
-  revenue at risk) and individual (local driver deltas, journey outlook, expected
+  revenue at risk) and individual (SHAP local drivers with a counterfactual
+  fallback, journey outlook, expected
   remaining tenure per customer).
 - **Three doors, one engine**: the Streamlit app, a FastAPI service
   (`uvicorn phase_2.api.rest:app`), and an MCP server so AI agents can operate the
