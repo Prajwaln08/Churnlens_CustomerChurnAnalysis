@@ -1,16 +1,8 @@
----
-title: ChurnLens
-emoji: "🔎"
-colorFrom: blue
-colorTo: green
-sdk: streamlit
-sdk_version: "1.59.0"
-python_version: "3.11"
-app_file: app/streamlit_app.py
-pinned: false
----
-
 # ChurnLens - Customer Churn Analytics Suite
+
+[![Live app](https://img.shields.io/badge/live_demo-churnlenstool.streamlit.app-brightgreen)](https://churnlenstool.streamlit.app)
+[![Tests](https://img.shields.io/badge/tests-125_passing-brightgreen)](#)
+[![LLM](https://img.shields.io/badge/LLM-local_Ollama_or_hosted_free_tier-blue)](#)
 
 One tool, five questions about every customer base: **who** will leave, **when**,
 **who can be saved**, **which segments** exist, and **what it costs to do nothing**.
@@ -22,7 +14,6 @@ flow to a live dashboard (`phase_2`). Prototyped in notebooks, productionized in
 importable packages, served through a Streamlit app, a REST API and an MCP server.
 
 > **Live demo:** https://churnlenstool.streamlit.app - one-click sample data, or bring any CSV; models train on what you upload.
-
 
 ---
 
@@ -64,6 +55,7 @@ datasets; the numbers are actual outputs, illustrative of the workflow.
 
 | Scenario | What the pipeline did | Result |
 |---|---|---|
+| Live deployment (Streamlit Cloud, hosted free-tier LLM) | visitor clicks a sample -> LLM maps the schema -> calibrated models train -> full dashboard | test ROC-AUC 0.897 (95% CI 0.86 - 0.93), $232K revenue at risk with CI, narrative by llama-3.1-8b-instant - number-audited |
 | Telco batch (300 customers) | validated columns, scored lenses A/B/D/E | $152,017 total revenue at risk; risk bands + top-10 call list |
 | Raw transaction log (3,928 rows) | recognised the shape, routed to lens E only | RFM segments + 12-month CLV of 217,594 GBP |
 | Foreign bank export (2,000 rows, 9 renamed columns) | local LLM proposed the schema mapping, human gate confirmed, TRAIN mode trained fresh models | 8/9 columns mapped correctly, 1 correctly left unmapped; test ROC-AUC 0.8416; id-like column quarantined as a leakage risk |
@@ -88,14 +80,23 @@ datasets; the numbers are actual outputs, illustrative of the workflow.
   against what customers actually did in the final 180 days.
 - **Self-bootstrapping deployment:** a fresh install trains its demo models from the
   public Telco dataset on first boot - no artifacts needed in git.
-- **Tested:** 99 tests cover profiling, mapping, orchestration, training, drift,
+- **Statistically honest:** served probabilities are calibrated (Brier +
+  bin table reported), headline metrics ship with bootstrap 95% CIs, datasets
+  with a date column are validated train-on-past / test-on-future, and risk
+  bands pivot on a cost-optimal threshold instead of 0.5.
+- **Closes the loop:** upload realized outcomes later and every run gets
+  graded (realized AUC vs training AUC -> "retrain recommended"); each
+  trained artifact ships a model card; a fairness audit reports score gaps
+  across user-flagged sensitive groups.
+- **Tested:** 125 tests cover profiling, mapping, orchestration, training, drift,
   analytics, connectors and both serving doors; they run offline in CI on every push.
 
 ## The app - four steps
 
 1. **What-if** - a single-customer form scored against demo models trained on the
    public IBM Telco dataset; a test account to try the tool before integrating data.
-2. **Add your data** - bring a file, database table or REST API. The pipeline
+2. **Add your data** - bring a file, database table or REST API (or use the
+   one-click synthetic samples if no data is handy). The pipeline
    profiles it, the local LLM proposes a mapping to the canonical schema, and an
    autonomy gate decides whether a human reviews it first (Level 0) or the run
    proceeds unattended (Level 1).
@@ -118,6 +119,8 @@ pip install -r requirements.txt
 
 # the app (first boot auto-trains demo models, ~1 min)
 streamlit run app/streamlit_app.py
+# the live demo runs this exact repo on Streamlit Community Cloud (free),
+# with Groq's free tier as the hosted LLM engine (see LLM engine below)
 
 # batch scoring from the CLI
 cd Code
@@ -138,9 +141,18 @@ python -m pytest tests/ -q   # from the project root
 
 Full analysis: run the notebooks in order (`Code/01_...` to `Code/05_...`).
 Notebooks 01-02 need the datasets in `Dataset/` (sources below); the MegaFon uplift
-dataset downloads itself on first use. The schema-mapping and narration features use
-a local Ollama model (`qwen2.5:7b-instruct`); without it the pipeline falls back to
-deterministic fuzzy matching and template narration.
+dataset downloads itself on first use.
+
+**LLM engine (pluggable):** schema mapping and run narration use a local
+Ollama model (`qwen2.5:7b-instruct`) when one is running - data never leaves
+the machine. Without Ollama, any OpenAI-compatible endpoint configured via
+`CHURNLENS_LLM_BASE_URL` / `CHURNLENS_LLM_API_KEY` / `CHURNLENS_LLM_MODEL`
+takes over (the live demo uses Groq's free tier; only column names, a few
+sample values and computed run facts are ever sent - never raw datasets).
+With neither, the pipeline falls back to deterministic fuzzy matching and
+template narration. LLM footprint is tiny either way: two calls per run,
+roughly 1-3K tokens. Every narrative is number-audited against computed
+facts regardless of the engine.
 
 ## Repository structure
 
@@ -169,7 +181,7 @@ Code/
     analytics/       insights.py, journeys.py (population + individual level)
     narration/       narrator.py (grounded summaries, number audit)
     api/             rest.py (FastAPI), mcp_server.py (MCP door)
-tests/                           # 99 tests, offline by design, run in CI
+tests/                           # 125 tests, offline by design, run in CI
 app/streamlit_app.py             # the ChurnLens UI (four-step flow above)
 assets/                          # README charts
 docs/                            # local design and planning notes (not committed)
