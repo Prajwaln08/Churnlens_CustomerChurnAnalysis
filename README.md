@@ -249,7 +249,9 @@ ingest -> profile -> map -> validate -> clean -> EDA -> mode -> train -> score -
 **Prajwal Nerkar** - designed, built and deployed end to end: the five-lens
 analysis, the data-agnostic pipeline, the LLM guardrails, and the live app.
 
+- LinkedIn: [linkedin.com/in/prajwal-nerkar](https://www.linkedin.com/in/prajwal-nerkar)
 - GitHub: [@Prajwaln08](https://github.com/Prajwaln08)
+- Email: nerkarprajwal08@gmail.com
 - Live project: https://churnlenstool.streamlit.app
 
 Feedback and questions are welcome - open an issue on this repository.
