@@ -19,32 +19,49 @@ importable packages, served through a Streamlit app, a REST API and an MCP serve
 
 ## The five lenses
 
-| Lens | Question | Method | Headline result |
-|---|---|---|---|
-| A - Classification | Who is likely to churn? | HistGradientBoosting (tuned), LogReg + RF baselines | ROC-AUC **0.845**; top-decile lift **2.81x** |
-| B - Survival | When will they leave? | Kaplan-Meier, Cox PH, Weibull AFT | C-index **0.86**; a quarter of the base has <=2 expected months left |
-| C - Uplift | Who can a campaign actually save? | T-learner (best of 3 meta-learners) | uplift@10% = **44pp** vs +5pp average effect (~9x targeting efficiency) |
-| D - Segmentation | What customer groups exist? | K-Means (silhouette-selected k) + RFM | churn 18.6% vs 31.7% across Telco clusters; 4 lifecycle segments in retail |
-| E - CLV | What is each customer worth? | BG/NBD + Gamma-Gamma, holdout-validated | MAE ~1 purchase on 6-month holdout; mean 12-mo CLV 1,394 GBP |
+| Lens | Question | Method | Trained on | Headline result |
+|---|---|---|---|---|
+| A - Classification | Who is likely to churn? | HistGradientBoosting (tuned), LogReg + RF baselines | IBM Telco | ROC-AUC **0.845**; top-decile lift **2.81x** |
+| B - Survival | When will they leave? | Kaplan-Meier, Cox PH, Weibull AFT | IBM Telco | C-index **0.86**; a quarter of the base has <=2 expected months left |
+| C - Uplift | Who can a campaign actually save? | T-learner (best of 3 meta-learners) | MegaFon experiment | uplift@10% = **44pp** vs +5pp average effect (~9x targeting efficiency) |
+| D - Segmentation | What customer groups exist? | K-Means (silhouette-selected k) + RFM | IBM Telco + Online Retail II | churn 18.6% vs 31.7% across Telco clusters; 4 lifecycle segments in retail |
+| E - CLV | What is each customer worth? | BG/NBD + Gamma-Gamma, holdout-validated | Online Retail II | MAE ~1 purchase on 6-month holdout; mean 12-mo CLV 1,394 GBP |
 
 **The synthesis:** Revenue-at-Risk = P(churn) x CLV per customer -
-**$3.6M** across the 7,043-customer demo base, with 31% of it concentrated
+**$3.6M** across the 7,043-customer IBM Telco base, with 31% of it concentrated
 in just 500 customers.
+
+## The datasets behind the numbers
+
+| Dataset | Powers | Size | Source |
+|---|---|---|---|
+| IBM Telco Customer Churn | lenses A, B, D + the demo what-if | 7,043 customers x 21 columns | public IBM sample |
+| UCI Online Retail II | lenses D, E | ~1.07M transactions, Dec 2009 - Dec 2011 | UCI ML Repository (id 502) |
+| MegaFon Uplift Experiment | lens C | ~600K customers, randomized campaign | `sklift.datasets.fetch_megafon` |
+
+Datasets and trained artifacts are intentionally not committed - loaders and
+the first-boot bootstrap rebuild everything. Every figure in this README is
+computed on these public datasets (or on clearly marked synthetic demo data)
+and is illustrative of the workflow; production use means retraining on
+business-specific data, which is exactly what the platform does on upload.
 
 ## Results at a glance
 
-Model finds 2.8x more churners than random in the first decile - top two deciles
-capture 51% of all churners:
+**IBM Telco - cumulative gains.** The classifier finds 2.8x more churners
+than random in the first decile - the top two deciles capture 51% of all
+churners:
 
 ![Cumulative gains](assets/gains_chart.png)
 
-Commitment is the strongest retention lever the business owns - month-to-month
-customers churn at 43%, two-year contracts at 3%:
+**IBM Telco - survival by contract.** Commitment is the strongest retention
+lever the business owns - month-to-month customers churn at 43%, two-year
+contracts at 3%:
 
 ![Survival by contract](assets/survival_by_contract.png)
 
-Non-contractual churn is visible without any label - typical retail cohort keeps
-~20% of customers one month after first purchase:
+**Online Retail II - cohort retention.** Non-contractual churn is visible
+without any label - a typical retail cohort keeps ~20% of customers one month
+after first purchase:
 
 ![Cohort retention](assets/cohort_retention.png)
 
@@ -56,13 +73,13 @@ datasets; the numbers are actual outputs, illustrative of the workflow.
 | Scenario | What the pipeline did | Result |
 |---|---|---|
 | Live deployment (Streamlit Cloud, hosted free-tier LLM) | visitor clicks a sample -> LLM maps the schema -> calibrated models train -> full dashboard | test ROC-AUC 0.897 (95% CI 0.86 - 0.93), $232K revenue at risk with CI, narrative by llama-3.1-8b-instant - number-audited |
-| Telco batch (300 customers) | validated columns, scored lenses A/B/D/E | $152,017 total revenue at risk; risk bands + top-10 call list |
-| Raw transaction log (3,928 rows) | recognised the shape, routed to lens E only | RFM segments + 12-month CLV of 217,594 GBP |
-| Foreign bank export (2,000 rows, 9 renamed columns) | local LLM proposed the schema mapping, human gate confirmed, TRAIN mode trained fresh models | 8/9 columns mapped correctly, 1 correctly left unmapped; test ROC-AUC 0.8416; id-like column quarantined as a leakage risk |
+| IBM Telco batch (300 customers) | validated columns, scored lenses A/B/D/E | $152,017 total revenue at risk; risk bands + top-10 call list |
+| Raw transaction log (Online Retail II sample, 3,928 rows) | recognised the shape, routed to lens E only | RFM segments + 12-month CLV of 217,594 GBP |
+| Foreign bank export (synthetic, 2,000 rows, 9 renamed columns) | local LLM proposed the schema mapping, human gate confirmed, TRAIN mode trained fresh models | 8/9 columns mapped correctly, 1 correctly left unmapped; test ROC-AUC 0.8416; id-like column quarantined as a leakage risk |
 | Second upload from the same source | replayed the confirmed mapping, no LLM call | ~36s first proposal vs ~0.1s replay |
-| Health-app event log (1,001 users) | engagement churn at weekly grain, sliced by condition | 91.4% churned, most common exit in week 2; retention@8 of 0.221 vs 0.098 across the condition slice |
-| Campaign file (1,500 customers) | uplift scoring for targeting | mean uplift +0.039, top-decile +0.336; 510 sleeping dogs flagged (contacting them increases churn) |
-| Broken file (tenure removed) | validation refused to score | every lens reports "not available in this data" with the reason - nothing fails silently |
+| Health-app event log (synthetic, 1,001 users) | engagement churn at weekly grain, sliced by condition | 91.4% churned, most common exit in week 2; retention@8 of 0.221 vs 0.098 across the condition slice |
+| Campaign file (MegaFon-style, 1,500 customers) | uplift scoring for targeting | mean uplift +0.039, top-decile +0.336; 510 sleeping dogs flagged (contacting them increases churn) |
+| Broken file (Telco with tenure removed) | validation refused to score | every lens reports "not available in this data" with the reason - nothing fails silently |
 | Drifted scoring batch | PSI against the training baseline | PSI 3.88 alert with "retraining recommended" |
 
 ## What makes it a tool, not a notebook
@@ -190,19 +207,6 @@ requirements.txt
 
 Workflow convention: every function was prototyped in a notebook first, then promoted
 to a package and imported from there - notebooks tell the story, packages ship it.
-
-## Data
-
-| Dataset | Role | Source |
-|---|---|---|
-| IBM Telco Customer Churn (7,043 x 21) | lenses A, B, D | public IBM sample |
-| Online Retail II (~1.07M transactions) | lenses D, E | UCI ML Repository (id 502) |
-| MegaFon Uplift (~600K, randomized) | lens C | `sklift.datasets.fetch_megafon` |
-
-Datasets and trained artifacts are intentionally not committed; loaders and the
-bootstrap rebuild everything. All results are illustrative of the workflow and
-calibrated to these public datasets - production use requires retraining on
-business-specific data (`python -m phase_1.serving.pipeline train`).
 
 ## The production pipeline (phase_2) - any dataset, end to end
 
