@@ -268,6 +268,11 @@ def _sanitize(raw: dict, profile: dict) -> dict:
         value_map = m.get("value_map")
         if not isinstance(value_map, dict) or target is None:
             value_map = None
+        elif target == "Churn":
+            # the label normalizer already understands every casing and
+            # synonym; an invented translation can silently collapse the
+            # label to one class (the scoreless-dashboard bug) - never allow
+            value_map = None
         elif "levels" in CANONICAL.get(target, {}):
             allowed = set(CANONICAL[target]["levels"])
             value_map = {str(k): v for k, v in value_map.items()

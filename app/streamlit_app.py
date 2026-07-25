@@ -591,10 +591,20 @@ def telco_base_probabilities() -> pd.Series | None:
 
 
 def completed_runs_with_scores() -> pd.DataFrame:
+    """Completed runs whose scored output actually exists on disk - an
+    explore-only run (no usable label) must not unlock the Dashboard."""
     runs = Registry().all_runs()
     if runs.empty:
         return runs
-    return runs[runs["status"] == "completed"].reset_index(drop=True)
+    runs = runs[runs["status"] == "completed"]
+    keep = []
+    for run_id in runs["run_id"]:
+        try:
+            if (RunManifest.load(run_id).run_dir / "scored.parquet").exists():
+                keep.append(run_id)
+        except FileNotFoundError:
+            pass
+    return runs[runs["run_id"].isin(keep)].reset_index(drop=True)
 
 
 def snapshot_journeys(scored: pd.DataFrame, slice_col: str | None) -> pd.DataFrame | None:
@@ -1259,11 +1269,17 @@ with tab_newdata:
                              f'<div style="display:grid;grid-template-columns:repeat(3,1fr);'
                              f'gap:10px;">{cells}</div>')
 
-                if ok:
+                if ok and bundle.get("scored") is not None:
                     banner("ok", "03 Process and 04 Dashboard are now unlocked",
                            "The full stage ledger, decision log and reports for this "
                            "run live in 03 Process; population and individual "
                            "analytics live in 04 Dashboard.")
+                elif ok:
+                    banner("warn", "Run completed without scores - Dashboard "
+                           "stays locked",
+                           "No model cleared its quality gate (often a label "
+                           "problem - check the train notes in 03 Process). Fix "
+                           "the label mapping at Level 0 and run again.")
                 else:
                     banner("err", "Run failed - open 03 Process",
                            "The stage ledger there shows exactly which stage stopped "

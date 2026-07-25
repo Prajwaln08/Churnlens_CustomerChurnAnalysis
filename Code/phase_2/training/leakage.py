@@ -107,6 +107,8 @@ def _missingness_mirrors_label(col: pd.Series, y: pd.Series) -> bool:
 
 def _near_perfect_predictor(col: pd.Series, y: pd.Series) -> bool:
     """Can this single column alone reproduce the label almost exactly?"""
+    if y.nunique() < 2:      # a constant label makes every column an
+        return False         # 'answer key' - that cascade helps nobody
     non_null = col.notna()
     if non_null.sum() < 20:
         return False

@@ -240,3 +240,14 @@ def test_model_card_written_on_train(labeled_frame, registry):
     assert "Decision threshold" in text
     assert "close_reason" in text          # exclusions with reasons
     assert str(card) in m.data["stages"]["train"]["artifacts"]
+
+
+def test_single_class_label_does_not_nuke_every_feature(labeled_frame, registry):
+    """Regression: with a constant label the near-perfect screen must stay
+    quiet instead of flagging every column as an answer key."""
+    frame = labeled_frame.assign(Churn=0)
+    m = run_pipeline(frame, "constant-label", autonomy_level=1,
+                     registry=registry, raise_on_error=True)
+    dropped = m.data["reports"]["training"]["leakage"]["dropped"]
+    assert not any("answer key" in r for r in dropped.values())
+    assert m.data["reports"]["training"]["lenses"]["A"]["status"] == "skipped"

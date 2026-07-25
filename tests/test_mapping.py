@@ -194,3 +194,15 @@ def test_remote_llm_transport_used_when_no_ollama(bank_frame, monkeypatch):
     assert calls["auth"] == "Bearer test-key"
     by_src = {m["source"]: m for m in prop["mappings"]}
     assert by_src["cust_ref"]["target"] == "customerID"
+
+
+def test_label_value_map_is_never_applied():
+    """Regression (cloud/Groq): an invented value_map on the label can
+    collapse it to one class. The sanitizer must strip it - the normalizer
+    handles label spellings on its own."""
+    profile = {"columns": {"churn_flag": {"role": "binary", "samples": []}}}
+    raw = {"mappings": [{"source": "churn_flag", "target": "Churn",
+                         "confidence": 0.9,
+                         "value_map": {"yes": "Churned", "no": "Retained"}}]}
+    prop = mapping._sanitize(raw, profile)
+    assert prop["mappings"][0]["value_map"] is None
